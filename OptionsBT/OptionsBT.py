@@ -158,8 +158,9 @@ class OptionsBT(object):
                 spot_df = self.get_index_data_between_dates(symbol, start_date, end_date)
             else:
                 spot_df = self.index_data_cache_DF[(self.index_data_cache_DF['TIMESTAMP'] >= start_date) &
-                                                   (self.index_data_cache_DF['TIMESTAMP'] == end_date)]
-
+                                                   (self.index_data_cache_DF['TIMESTAMP'] <= end_date)]
+            
+            spot_df.sort_values(by='TIMESTAMP', axis=0, inplace=True)
             start_date = spot_df['TIMESTAMP'].iloc[0]
 
             if self.option_data_cache_DF is None:
@@ -206,6 +207,7 @@ class OptionsBT(object):
             expirys = self.get_last_n_expiry_dates(self.current_symbol, n_expiry, is_index)
             expirys['EX_START'] = expirys['EXPIRY_DT'].shift(-1)
             expirys.dropna(inplace=True)
+            expirys.sort_values(by='EX_START', axis=0, inplace=True)
             st = expirys['EX_START'].iloc[0]
             nd = expirys['EXPIRY_DT'].iloc[-1]
             self.index_data_cache_DF = self.get_index_data_between_dates(self.current_symbol, st, nd)
@@ -483,3 +485,4 @@ class OptionsBT(object):
 
 if __name__ == '__main__':
     op = OptionsBT()
+    op.bank_nifty_expiry_to_expiry(n_expiry=10)
