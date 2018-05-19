@@ -485,4 +485,4 @@ class OptionsBT(object):
 
 if __name__ == '__main__':
     op = OptionsBT()
-    op.bank_nifty_expiry_to_expiry(n_expiry=10)
+    op.bank_nifty_expiry_to_expiry(n_expiry=25)
