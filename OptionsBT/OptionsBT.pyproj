@@ -22,10 +22,19 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="dbtables.py" />
+    <Compile Include="InstrumentType.py">
+      <SubType>Code</SubType>
+    </Compile>
     <Compile Include="MultiIndexColumns.py" />
     <Compile Include="OptionsBT.py" />
+    <Compile Include="PositionType.py">
+      <SubType>Code</SubType>
+    </Compile>
     <Compile Include="Settings.py" />
     <Compile Include="util.py" />
+  </ItemGroup>
+  <ItemGroup>
+    <Content Include="RefCode.txt" />
   </ItemGroup>
   <Import Project="$(MSBuildExtensionsPath32)\Microsoft\VisualStudio\v$(VisualStudioVersion)\Python Tools\Microsoft.PythonTools.targets" />
   <!-- Uncomment the CoreCompile target to enable the Build command in

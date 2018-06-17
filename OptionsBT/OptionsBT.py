@@ -5,8 +5,10 @@ import pandas as pd
 import numpy as np
 
 import dbtables
-from util import get_current_date, print_exception, fix_start_and_end_date
-
+from log import print_exception
+from TypeEnums import PositionType, CandleData, InstrumentType
+from Utility import fix_start_and_end_date, get_current_date
+import Defaults
 
 class OptionsBT(object):
     def __init__(self):
@@ -16,12 +18,8 @@ class OptionsBT(object):
             self.fno_table = Table(dbtables.FNO, self.meta_data, autoload=True)
             self.index_table = Table(dbtables.IINDEX, self.meta_data, autoload=True)
             self.stock_table = Table(dbtables.STOCKS, self.meta_data, autoload=True)
-            self.index_data_cache_DF = None
-            self.option_data_cache_DF = None
             self.last_DF = None
-            self.current_symbol = None
             self.last_stm = None
-            self.index_straddle_df = None
             self.losing_streak_counter = 0
 
         except Exception as e:
@@ -32,313 +30,86 @@ class OptionsBT(object):
             start_date, end_date = fix_start_and_end_date(start_date, end_date)
             meta = MetaData(self.db)
             dts = Table(table, meta, autoload=True)
-            stm = select(['*']).where(
-                and_(dts.c.TIMESTAMP >= start_date, dts.c.TIMESTAMP <= end_date, dts.c.SYMBOL == symbol))
+            stm = select(['*']).where(and_(dts.c.TIMESTAMP >= start_date, dts.c.TIMESTAMP <= end_date, dts.c.SYMBOL == symbol))
             return stm
         except Exception as e:
             print_exception(e)
             return None
 
-    def get_index_data_between_dates(self, symbol, start_date, end_date=None):
+    def get_spot_data_between_dates(self, symbol, instrument, start_date, end_date=None):
         try:
-            self.current_symbol = symbol
             start_date, end_date = fix_start_and_end_date(start_date, end_date)
-            self.last_stm = select(['*']).where(
-                and_(self.index_table.c.TIMESTAMP >= start_date, self.index_table.c.TIMESTAMP <= end_date,
-                     self.index_table.c.SYMBOL == symbol))
-            self.last_DF = pd.read_sql_query(self.last_stm, con=self.db, parse_dates=['TIMESTAMP'])
-            self.last_DF.drop([self.last_DF.columns[0]], axis=1, inplace=True)
-            self.last_DF.reset_index(drop=True, inplace=True)
-            return self.last_DF[self.last_DF.columns[0:6]]
-        except Exception as e:
-            print_exception(e)
-            return None
 
-    def get_index_data_for_today(self, symbol):
-        self.current_symbol = symbol
-        df = self.get_index_data_between_dates(symbol, get_current_date())
-        return df
-
-    def get_index_data_for_last_n_days(self, symbol, n_days=0):
-        self.current_symbol = symbol
-        end_date = get_current_date()
-        start_date = end_date - timedelta(days=n_days)
-        df = self.get_index_data_between_dates(symbol, start_date, end_date)
-        return df
-
-    def get_option_data_between_dates(self, symbol, start_date, end_date=None, is_index=True):
-        try:
-            self.current_symbol = symbol
-            start_date, end_date = fix_start_and_end_date(start_date, end_date)
-            if is_index:
-                instrument = 'OPTIDX'
+            if "IDX" in instrument:
+                self.last_stm = select(['*']).where(and_(self.index_table.c.TIMESTAMP >= start_date, self.index_table.c.TIMESTAMP <= end_date, self.index_table.c.SYMBOL == symbol))
             else:
-                instrument = 'OPTSTK'
+                self.last_stm = select(['*']).where(and_(self.stock_table.c.TIMESTAMP >= start_date, self.stock_table.c.TIMESTAMP <= end_date, self.stock_table.c.SYMBOL == symbol))
 
-            self.last_stm = select(['*']).where(
-                and_(self.fno_table.c.INSTRUMENT == instrument, self.fno_table.c.TIMESTAMP >= start_date,
-                     self.fno_table.c.TIMESTAMP <= end_date,
-                     self.fno_table.c.SYMBOL == symbol))
+            self.spot_DF = pd.read_sql_query(self.last_stm, con=self.db, parse_dates=['TIMESTAMP'])
+            self.spot_DF.drop([self.spot_DF.columns[0]], axis=1, inplace=True)
+            self.spot_DF.sort_values(['TIMESTAMP'], inplace=True)
+            self.spot_DF.reset_index(drop=True, inplace=True)
 
-            self.last_DF = pd.read_sql_query(self.last_stm, con=self.db, parse_dates=['TIMESTAMP', 'EXPIRY_DT'])
-            self.last_DF.sort_values(['OPTION_TYP', 'EXPIRY_DT', 'STRIKE_PR'], inplace=True)
-            self.last_DF.drop(self.last_DF.columns[0:2], axis=1, inplace=True)
-            self.last_DF.reset_index(drop=True, inplace=True)
-            return self.last_DF[self.last_DF.columns[-1:].append(self.last_DF.columns[0:8])]
+            if "IDX" in instrument:
+                return self.spot_DF[self.spot_DF.columns[0:6]]
+            else:
+                return self.spot_DF[self.spot_DF.columns[-2::2].append(self.spot_DF.columns[0:6]).drop('SERIES')]
         except Exception as e:
             print_exception(e)
             return None
 
-    def get_option_data_for_today(self, symbol, is_index=True):
-        self.current_symbol = symbol
-        df = self.get_option_data_between_dates(symbol, get_current_date(), is_index=is_index)
-        return df
+    def get_spot_data_for_today(self, symbol, instrument):
+        return self.get_spot_data_between_dates(symbol, instrument, get_current_date())
 
-    def get_option_data_for_last_n_days(self, symbol, n_days=0, is_index=True):
-        self.current_symbol = symbol
+    def get_spot_data_for_last_n_days(self, symbol, instrument, n_days=0):
         end_date = get_current_date()
-        start_date = end_date - timedelta(days=n_days)
-        df = self.get_option_data_between_dates(symbol, start_date, end_date, is_index=is_index)
-        return df
+        # Add 5 days to n_days and filter only required number days
+        start_date = end_date - timedelta(days=n_days + 5)
+        spot_data = self.get_spot_data_between_dates(symbol, instrument, start_date, end_date)
+        return spot_data.tail(n_days)
 
-    def get_stock_data_between_dates(self, symbol, start_date, end_date=None):
+    def get_fno_data_between_dates(self, symbol, start_date, end_date=None):
         try:
-            self.current_symbol = symbol
             start_date, end_date = fix_start_and_end_date(start_date, end_date)
-            self.last_stm = select(['*']).where(
-                and_(self.stock_table.c.TIMESTAMP >= start_date, self.stock_table.c.TIMESTAMP <= end_date,
-                     self.stock_table.c.SYMBOL == symbol))
-            self.last_DF = pd.read_sql_query(self.last_stm, con=self.db, parse_dates=['TIMESTAMP'])
-            self.last_DF.drop([self.last_DF.columns[0]], axis=1, inplace=True)
-            self.last_DF.reset_index(drop=True, inplace=True)
-            return self.last_DF[self.last_DF.columns[-2::2].append(self.last_DF.columns[0:6]).drop('SERIES')]
+            self.last_stm = select(['*']).where(and_(self.fno_table.c.TIMESTAMP >= start_date, self.fno_table.c.TIMESTAMP <= end_date, self.fno_table.c.SYMBOL == symbol))
+            self.fno_DF = pd.read_sql_query(self.last_stm, con=self.db, parse_dates=['TIMESTAMP', 'EXPIRY_DT'])
+            self.fno_DF.sort_values(['OPTION_TYP', 'EXPIRY_DT', 'TIMESTAMP', 'STRIKE_PR'], inplace=True)
+            self.fno_DF.reset_index(drop=True, inplace=True)
+            return True
         except Exception as e:
             print_exception(e)
-            return None
+            return False
 
-    def get_stock_data_for_today(self, symbol):
-        self.current_symbol = symbol
-        df = self.get_stock_data_between_dates(symbol, get_current_date())
-        return df
+    def get_fno_data_for_today(self, symbol):
+        return self.get_fno_data_between_dates(symbol, get_current_date())
 
-    def get_stock_data_for_last_n_days(self, symbol, n_days=0):
-        self.current_symbol = symbol
+    def get_fno_data_for_last_n_days(self, symbol, n_days=0):
         end_date = get_current_date()
-        start_date = end_date - timedelta(days=n_days)
-        df = self.get_stock_data_between_dates(symbol, start_date, end_date)
-        return df
+        start_date = end_date - timedelta(days=n_days + 5)
+        return self.get_fno_data_between_dates(symbol, start_date, end_date)
 
-    def get_last_n_expiry_dates(self, symbol, n_expiry=10, is_index=True):
-        self.current_symbol = symbol
+    def get_last_n_expiry_dates(self, symbol, instrument, n_expiry):
         end_date = get_current_date()
 
-        if is_index:
-            instrument = 'OPTIDX'
-        else:
-            instrument = 'OPTSTK'
-
-        self.last_stm = select([text('EXPIRY_DT')]).where(
-            and_(self.fno_table.c.INSTRUMENT == instrument, self.fno_table.c.EXPIRY_DT <= end_date,
+        self.last_stm = select([text('EXPIRY_DT')]).where(and_(self.fno_table.c.INSTRUMENT == instrument, self.fno_table.c.EXPIRY_DT <= end_date,
                  self.fno_table.c.SYMBOL == symbol)).distinct().\
             order_by(desc(self.fno_table.c.EXPIRY_DT)).limit(n_expiry + 1)
         self.last_DF = pd.read_sql_query(self.last_stm, con=self.db, parse_dates=['EXPIRY_DT'])
         return self.last_DF
+    
+    def get_last_n_expiry_with_starting_dates(self, symbol, instrument, n_expiry):
+        df = self.get_last_n_expiry_dates(symbol, instrument, n_expiry)
+        df['EX_START'] = df['EXPIRY_DT'].shift(-1) + pd.Timedelta('1Day')
+        df.dropna(inplace=True)
+        df.sort_values(by='EX_START', axis=0, inplace=True)
+        return df[['EX_START', 'EXPIRY_DT']]
 
-    def count_losing_streak(self, x):
-        if x < 0:
-            self.losing_streak_counter += 1
-        else:
-            self.losing_streak_counter = 0
-        return self.losing_streak_counter
-
-    def get_e2e_straddle_normal(self, symbol, start_date, end_date, is_index=True):
-        try:
-            print('START {0} : END {1}'.format(start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d')))
-            if self.index_data_cache_DF is None:
-                spot_df = self.get_index_data_between_dates(symbol, start_date, end_date)
-            else:
-                spot_df = self.index_data_cache_DF[(self.index_data_cache_DF['TIMESTAMP'] >= start_date) &
-                                                   (self.index_data_cache_DF['TIMESTAMP'] <= end_date)]
-            
-            spot_df.sort_values(by='TIMESTAMP', axis=0, inplace=True)
-            start_date = spot_df['TIMESTAMP'].iloc[0]
-
-            if self.option_data_cache_DF is None:
-                opti_df = self.get_option_data_between_dates(symbol, start_date, end_date, is_index)
-            else:
-                opti_df = self.option_data_cache_DF[(self.option_data_cache_DF['TIMESTAMP'] >= start_date) &
-                                                    (self.option_data_cache_DF['TIMESTAMP'] == end_date)]
-
-            opfl_df = opti_df[(opti_df['TIMESTAMP'] >= start_date) & (opti_df['EXPIRY_DT'] == end_date)]
-            spot = spot_df['OPEN'].iloc[0]
-            strike_i = np.abs(opfl_df['STRIKE_PR']-spot).idxmin()
-            strike = opti_df['STRIKE_PR'].loc[strike_i]
-            options_df = opti_df[(opti_df['TIMESTAMP'] >= start_date) & (opti_df['EXPIRY_DT'] == end_date) & (
-                        opti_df['STRIKE_PR'] == strike)]
-
-            opg = options_df.groupby('OPTION_TYP')
-            self.ce_df = opg.get_group('CE').drop('OPTION_TYP', axis=1).set_index('TIMESTAMP')
-            self.pe_df = opg.get_group('PE').drop('OPTION_TYP', axis=1).set_index('TIMESTAMP')
-            days = (end_date - start_date).days
-            # dayss = '{}D'.format(days)
-            # dayss = '7D'
-            conversion = {'OPEN': 'first', 'HIGH': 'max', 'LOW': 'min', 'CLOSE': 'last'}
-            # cer = self.ce_df.resample(dayss).agg(conversion)
-            # per = self.pe_df.resample(dayss).agg(conversion)
-
-            ce_df = OptionsBT.get_hlc_difference_with_o(self.ce_df)
-            pe_df = OptionsBT.get_hlc_difference_with_o(self.pe_df)
-
-            self.chain_df = ce_df.merge(pe_df, how='outer',
-                                   left_index=True, right_index=True,
-                                   suffixes=['_C', '_P'])
-            spr = spot_df.set_index('TIMESTAMP').resample('7D').agg(conversion)
-            spr['STRIKE'] = strike
-            self.straddle_df = spr.merge(self.chain_df, how='outer', left_index=True, right_index=True)
-            return self.straddle_df
-        except Exception as ex:
-            print_exception(ex)
-            return None
-
-    def expiry_to_expiry_straddle(self, symbol, qty, stop_loss, brokerage, initial_capital=100000, n_expiry=10,
-                                  is_index=True):
-        try:
-            self.current_symbol = symbol.upper()
-            expirys = self.get_last_n_expiry_dates(self.current_symbol, n_expiry, is_index)
-            expirys['EX_START'] = expirys['EXPIRY_DT'].shift(-1)
-            expirys.dropna(inplace=True)
-            expirys.sort_values(by='EX_START', axis=0, inplace=True)
-            st = expirys['EX_START'].iloc[0]
-            nd = expirys['EXPIRY_DT'].iloc[-1]
-            self.index_data_cache_DF = self.get_index_data_between_dates(self.current_symbol, st, nd)
-            self.option_data_cache_DF = self.get_option_data_between_dates(self.current_symbol, st, nd)
-            exps = expirys.groupby(['EX_START', 'EXPIRY_DT']).\
-                apply(lambda x: self.get_e2e_straddle_normal(self.current_symbol,
-                                                             x['EX_START'].iloc[0],
-                                                             x['EXPIRY_DT'].iloc[0]))
-            straddle_df = exps.reset_index(level=[1, 2])
-            straddle_df['HL'] = straddle_df['H-O_C'] + straddle_df['L-O_P']
-            straddle_df['LH'] = straddle_df['L-O_C'] + straddle_df['H-O_P']
-            straddle_df['CC'] = straddle_df['C-O_C'] + straddle_df['C-O_P']
-            straddle_df['QTY'] = qty
-            straddle_df['HLG_L'] = straddle_df['HL'] * qty
-            straddle_df['LHG_L'] = straddle_df['LH'] * qty
-            straddle_df['CCG_L'] = straddle_df['CC'] * qty
-            straddle_df['MIN_L'] = straddle_df[['HLG_L', 'LHG_L']].min(axis=1)
-            straddle_df['MAX_L'] = straddle_df[['HLG_L', 'LHG_L']].max(axis=1)
-            straddle_df['MAX_L_NET'] = straddle_df['MAX_L'] + stop_loss
-            straddle_df['GROSS'] = np.where(straddle_df['MIN_L'] > stop_loss,
-                                            np.where(straddle_df['MAX_L_NET'] > straddle_df['CCG_L'],
-                                                     straddle_df['MAX_L_NET'], straddle_df['CCG_L']),
-                                            stop_loss)
-            straddle_df['BROKERAGE'] = brokerage
-            straddle_df['NET'] = straddle_df['GROSS'] - brokerage
-            straddle_df['CAPITAL_REQ'] = qty * (straddle_df['OPEN_C'] + straddle_df['OPEN_P'])
-            straddle_df['CAPITAL_INI'] = initial_capital
-            straddle_df['CAPITAL_NET'] = initial_capital + straddle_df['NET'].cumsum()
-            straddle_df['CAPITAL_INI'] = straddle_df['CAPITAL_NET'].shift(1)
-            straddle_df['CAPITAL_INI'].iat[0] = initial_capital
-            straddle_df['LOSE_COUNT'] = straddle_df['NET'].apply(self.count_losing_streak)
-            return straddle_df
-        except Exception as ex:
-            print_exception(ex)
-
-    def get_e2e_straddle_by_close(self, symbol, entry_date, start_date, end_date, is_index=True):
-        try:
-            print('ENTER_ON {} : START {} : END {}'.format(entry_date.strftime('%Y-%m-%d'),
-                                                           start_date.strftime('%Y-%m-%d'),
-                                                           end_date.strftime('%Y-%m-%d')))
-            if self.index_data_cache_DF is None:
-                spot_df = self.get_index_data_between_dates(symbol, entry_date, end_date)
-            else:
-                spot_df = self.index_data_cache_DF[(self.index_data_cache_DF['TIMESTAMP'] >= entry_date) &
-                                                   (self.index_data_cache_DF['TIMESTAMP'] <= end_date)]
-
-            start_date = spot_df['TIMESTAMP'].iloc[0]
-            spot = self.index_data_cache_DF[(self.index_data_cache_DF['TIMESTAMP'] >= start_date)]['CLOSE'].iloc[0]
-
-            if self.option_data_cache_DF is None:
-                opti_df = self.get_option_data_between_dates(symbol, entry_date, end_date, is_index)
-            else:
-                opti_df = self.option_data_cache_DF[(self.option_data_cache_DF['TIMESTAMP'] >= entry_date) &
-                                                    (self.option_data_cache_DF['TIMESTAMP'] <= end_date)]
-
-            opfl_df = opti_df[(opti_df['TIMESTAMP'] >= start_date) & (opti_df['EXPIRY_DT'] == end_date)]
-
-            strike_i = np.abs(opfl_df['STRIKE_PR']-spot).idxmin()
-            strike = opti_df['STRIKE_PR'].loc[strike_i]
-            options_df = opti_df[(opti_df['TIMESTAMP'] >= start_date) & (opti_df['EXPIRY_DT'] == end_date) & (
-                        opti_df['STRIKE_PR'] == strike)]
-
-            opg = options_df.groupby('OPTION_TYP')
-            self.ce_df = opg.get_group('CE').drop('OPTION_TYP', axis=1).set_index('TIMESTAMP')
-            self.pe_df = opg.get_group('PE').drop('OPTION_TYP', axis=1).set_index('TIMESTAMP')
-            days = (end_date - start_date).days + 1
-            dayss = '{}D'.format(days)
-            print(dayss)
-            # dayss = '7D'
-            conversion = {'OPEN': 'first', 'HIGH': 'max', 'LOW': 'min', 'CLOSE': 'last'}
-            cer = self.ce_df.resample(dayss).agg(conversion)
-            per = self.pe_df.resample(dayss).agg(conversion)
-
-            ce_df = OptionsBT.get_hlc_difference_with_o(cer)
-            pe_df = OptionsBT.get_hlc_difference_with_o(per)
-
-            chain_df = ce_df.merge(pe_df, how='outer',
-                                   left_index=True, right_index=True,
-                                   suffixes=['_C', '_P'])
-            spr = spot_df.set_index('TIMESTAMP').resample(dayss).agg(conversion)
-            spr['STRIKE'] = strike
-            straddle_df = spr.merge(chain_df, how='outer', left_index=True, right_index=True)
-            return straddle_df
-        except Exception as ex:
-            print_exception(ex)
-            return None
-
-    def expiry_to_expiry_straddle_by_close(self, symbol, qty, stop_loss, brokerage, initial_capital=100000, n_expiry=10,
-                                           is_index=True):
-        try:
-            self.current_symbol = symbol.upper()
-            expirys = self.get_last_n_expiry_dates(self.current_symbol, n_expiry, is_index)
-            expirys['EX_START'] = expirys['EXPIRY_DT'].shift(-1) + pd.Timedelta(days=1)
-            expirys['ENTER_ON'] = expirys['EXPIRY_DT'].shift(-1)
-            expirys.dropna(inplace=True)
-
-            st = expirys['ENTER_ON'].iloc[0]
-            nd = expirys['EXPIRY_DT'].iloc[-1]
-            self.index_data_cache_DF = self.get_index_data_between_dates(self.current_symbol, st, nd)
-            self.option_data_cache_DF = self.get_option_data_between_dates(self.current_symbol, st, nd)
-
-            exps = expirys.groupby(['EX_START', 'EXPIRY_DT']).apply(lambda x:
-                                                                    self.get_e2e_straddle_by_close(self.current_symbol,
-                                                                                                   x['ENTER_ON'].iloc[0],
-                                                                                                   x['EX_START'].iloc[0],
-                                                                                                   x['EXPIRY_DT'].iloc[0]))
-            straddle_df = exps.reset_index(level=[1, 2])
-            straddle_df['HL'] = straddle_df['H-O_C'] + straddle_df['L-O_P']
-            straddle_df['LH'] = straddle_df['L-O_C'] + straddle_df['H-O_P']
-            straddle_df['CC'] = straddle_df['C-O_C'] + straddle_df['C-O_P']
-            straddle_df['QTY'] = qty
-            straddle_df['HLG_L'] = straddle_df['HL'] * qty
-            straddle_df['LHG_L'] = straddle_df['LH'] * qty
-            straddle_df['CCG_L'] = straddle_df['CC'] * qty
-            straddle_df['MIN_L'] = straddle_df[['HLG_L', 'LHG_L']].min(axis=1)
-            straddle_df['MAX_L'] = straddle_df[['HLG_L', 'LHG_L']].max(axis=1)
-            straddle_df['MAX_L_NET'] = straddle_df['MAX_L'] + stop_loss
-            straddle_df['GROSS'] = np.where(straddle_df['MIN_L'] > stop_loss,
-                                            np.where(straddle_df['MAX_L_NET'] > straddle_df['CCG_L'],
-                                                     straddle_df['MAX_L_NET'], straddle_df['CCG_L']), stop_loss)
-            straddle_df['BROKERAGE'] = brokerage
-            straddle_df['NET'] = straddle_df['GROSS'] - brokerage
-            straddle_df['CAPITAL_REQ'] = qty * (straddle_df['OPEN_C'] + straddle_df['OPEN_P'])
-            straddle_df['CAPITAL_INI'] = initial_capital
-            straddle_df['CAPITAL_NET'] = initial_capital + straddle_df['NET'].cumsum()
-            straddle_df['CAPITAL_INI'] = straddle_df['CAPITAL_NET'].shift(1)
-            straddle_df['CAPITAL_INI'].iat[0] = initial_capital
-            straddle_df['LOSE_COUNT'] = straddle_df['NET'].apply(self.count_losing_streak)
-            return straddle_df
-        except Exception as ex:
-            print_exception(ex)
+    def get_last_n_expiry_to_expiry_dates(self, symbol, instrument, n_expiry):
+        df = self.get_last_n_expiry_dates(symbol, instrument, n_expiry)
+        df['EX_START'] = df['EXPIRY_DT'].shift(-1)
+        df.dropna(inplace=True)
+        df.sort_values(by='EX_START', axis=0, inplace=True)
+        return df[['EX_START', 'EXPIRY_DT']]
 
     @staticmethod
     def get_hlc_difference_with_o(df):
@@ -362,7 +133,7 @@ class OptionsBT(object):
         return chain_df
 
     @staticmethod
-    def calculate_net(straddle_df, qty, stop_loss, brokerage):
+    def calculate_daily_net(straddle_df, qty, stop_loss, brokerage):
         try:
             straddle_df['HL'] = straddle_df['H-O_C'] + straddle_df['L-O_P']
             straddle_df['LH'] = straddle_df['L-O_C'] + straddle_df['H-O_P']
@@ -399,35 +170,69 @@ class OptionsBT(object):
             print_exception(ex)
 
     @staticmethod
-    def get_straddle(options_df, spot_df, qty, brokerage, stop_loss, strike_price=None):
+    def calculate_profit(strategy, lot_size, num_lot, brokerage, position, stop_loss):
+        strategy['HL'] = strategy['H-O_C'] + strategy['L-O_P']
+        strategy['LH'] = strategy['L-O_C'] + strategy['H-O_P']
+        strategy['CC'] = strategy['C-O_C'] + strategy['C-O_P']
+        strategy['LOT_SIZE'] = lot_size
+        strategy['NUM_LOT'] = num_lot
+        qty = lot_size * num_lot
+        strategy['QTY'] = lot_size * num_lot
+        strategy['BROKERAGE'] = brokerage
+        strategy['STOP_LOSS'] = stop_loss
+        strategy['HLG_LONG'] = strategy['HL'] * qty
+        strategy['LHG_LONG'] = strategy['LH'] * qty
+        strategy['CCG_LONG'] = strategy['CC'] * qty
+        strategy['MIN_LONG'] = strategy[['HLG_LONG', 'LHG_LONG', 'CCG_LONG']].min(axis=1)
+        strategy['MAX_LONG'] = strategy[['HLG_LONG', 'LHG_LONG', 'CCG_LONG']].max(axis=1)
+        strategy['MAX_LONG_NET'] = strategy['MAX_LONG'] + stop_loss
+        strategy['NET_LONG'] = np.where(strategy['MIN_LONG'] > stop_loss, np.where(strategy['MAX_LONG_NET'] > strategy['CCG_LONG'], strategy['MAX_LONG_NET'], strategy['CCG_LONG']), stop_loss) - brokerage
+        strategy['HLG_SHORT'] = strategy['HLG_LONG'] * -1
+        strategy['LHG_SHORT'] = strategy['LHG_LONG'] * -1
+        strategy['CCG_SHORT'] = strategy['CCG_LONG'] * -1
+        strategy['MIN_SHORT'] = strategy[['HLG_SHORT', 'LHG_SHORT', 'CCG_SHORT']].min(axis=1)
+        strategy['MAX_SHORT'] = strategy[['HLG_SHORT', 'LHG_SHORT', 'CCG_SHORT']].max(axis=1)
+        strategy['MAX_SHORT_NET'] = strategy['MAX_SHORT'] + stop_loss
+        strategy['NET_SHORT'] = np.where(strategy['MIN_SHORT'] > stop_loss, np.where(strategy['MAX_SHORT_NET'] > strategy['CCG_SHORT'], strategy['MAX_SHORT_NET'], strategy['CCG_SHORT']), stop_loss) - brokerage
+        columns = strategy.columns.insert(6, 'DTE')
+        strategy['DTE'] = (strategy['EXPIRY_DT'] - strategy['TIMESTAMP']).dt.days
+        return strategy[columns]
+
+    @staticmethod
+    def get_straddle(options_df, spot_df, strike_price=None):
         try:
-            # If the given stop loss is greater than 0 flip the sign
-            if stop_loss > 0:
-                print('Changing given stop loss to negative ', stop_loss)
-                stop_loss = stop_loss * -1
-                print('Given stop loss changed to negative ', stop_loss)
-
             options_chain_df = OptionsBT.get_options_chain(options_df)
-
             straddle_df = spot_df.merge(options_chain_df, how='outer', on=['TIMESTAMP', 'SYMBOL'])
             if strike_price is None:
-                straddle_index = straddle_df.groupby('TIMESTAMP').apply(
-                    lambda x: (np.abs(x['OPEN'] - x['STRIKE_PR'])).idxmin())
+                straddle_index = straddle_df.groupby('TIMESTAMP').apply(lambda x: (np.abs(x['OPEN'] - x['STRIKE_PR'])).idxmin())
             else:
-                straddle_index = straddle_df.groupby('TIMESTAMP').apply(
-                    lambda x: (np.abs(strike_price - x['STRIKE_PR'])).idxmin())
-
+                straddle_index = straddle_df.groupby('TIMESTAMP').apply(lambda x: (np.abs(strike_price - x['STRIKE_PR'])).idxmin())
             straddle_df = straddle_df.loc[straddle_index].reset_index(drop=True)
-            return OptionsBT.calculate_net(straddle_df, qty, stop_loss, brokerage)
+            return straddle_df.dropna()
         except Exception as e:
             print_exception(e)
             return None
 
+    def count_losing_streak(self, x):
+        if x < 0:
+            self.losing_streak_counter += 1
+        else:
+            self.losing_streak_counter = 0
+        return self.losing_streak_counter
+
     def index_daily_straddle(self, symbol, qty, brokerage, stop_loss, n_days=10, strike_price=None):
-        options_df = self.get_option_data_for_last_n_days(symbol, n_days=n_days, is_index=True)
-        spot_df = self.get_index_data_for_last_n_days(symbol, n_days=n_days)
-        self.index_straddle_df = self.get_straddle(options_df, spot_df, qty,
-                                                   brokerage, stop_loss, strike_price=strike_price)
+        if stop_loss > 0:
+            stop_loss = stop_loss * -1
+
+        if self.get_fno_data_for_last_n_days(symbol, n_days):
+            self.futures_data = self.fno_DF[self.fno_DF['INSTRUMENT'] == InstrumentType.IndexFutures]
+            self.options_data = self.fno_DF[self.fno_DF['INSTRUMENT'] == InstrumentType.IndexOptions]
+            self.futures_data.drop(self.futures_data.columns[0:2], axis=1, inplace=True)
+            self.options_data.drop(self.options_data.columns[0:2], axis=1, inplace=True)
+
+        self.spot_data = self.get_spot_data_for_last_n_days(symbol, InstrumentType.Index, n_days=n_days)
+        straddle_df = OptionsBT.get_straddle(self.options_data, self.spot_data, strike_price)
+        self.index_straddle_df = OptionsBT.calculate_daily_net(straddle_df, qty, stop_loss, brokerage)
 
         self.index_straddle_df['LOSE_COUNT'] = self.index_straddle_df['NET'].apply(self.count_losing_streak)
         columns = self.index_straddle_df.columns
@@ -444,45 +249,93 @@ class OptionsBT(object):
                              get_current_date().strftime('%Y-%m-%d')), engine='openpyxl', index=False)
         return self.index_straddle_df
 
-    def bank_nifty_straddle_for_one_year(self):
-        bn_df = self.bank_nifty_straddle_for_last_n_days(n_days=370)
-        return bn_df
 
-    def bank_nifty_straddle_for_last_n_days(self, n_days):
+
+    def bank_nifty_daily_straddle_for_last_n_days(self, n_days):
         bn_df = self.index_daily_straddle('BANKNIFTY', qty=80, brokerage=500, stop_loss=-2000, n_days=n_days)
         return bn_df
 
-    def daily_nifty_bank_nifty(self):
-        ndf = self.index_daily_straddle('NIFTY', qty=150, brokerage=500, stop_loss=-2000, n_days=2)
-        print(ndf)
-        bndf = self.index_daily_straddle('BANKNIFTY', qty=80, brokerage=500, stop_loss=-2000, n_days=2)
-        print(bndf)
+    @staticmethod
+    def get_atm_strike(day, spot_data, options_data, at):
+        od_df = options_data[options_data['TIMESTAMP'] >= day]
+        sd_df = spot_data[spot_data['TIMESTAMP'] >= day]
+        if at == CandleData.OPEN:
+            spot = sd_df['OPEN'].iloc[0]
+        elif at == CandleData.CLOSE:
+            spot = sd_df['CLOSE'].iloc[0]
+        atm_i = np.abs(od_df['STRIKE_PR'] - spot).idxmin()
+        strike = od_df['STRIKE_PR'].loc[atm_i]
+        return strike
 
-    def get_straddle_at_strike(self, symbol, strike_price, n_days=2):
-        df = self.index_daily_straddle(symbol, qty=80, brokerage=500, stop_loss=-2000,
-                                       n_days=n_days, strike_price=strike_price)
+    @staticmethod
+    def get_strikes_at_price(day, options_data, price, at):
+        cs = options_data[(options_data['TIMESTAMP'] >= day) & (options_data['OPTION_TYP'] == 'CE')]
+        ps = options_data[(options_data['TIMESTAMP'] >= day) & (options_data['OPTION_TYP'] == 'PE')]
+        if at == CandleData.OPEN:
+            ci = np.abs(cs[(cs['TIMESTAMP'] == cs['TIMESTAMP'].iloc[0]) & (cs['EXPIRY_DT'] == cs['EXPIRY_DT'].iloc[0])]['OPEN'] - price).idxmin()
+            pi = np.abs(ps[(ps['TIMESTAMP'] == ps['TIMESTAMP'].iloc[0]) & (ps['EXPIRY_DT'] == ps['EXPIRY_DT'].iloc[0])]['OPEN'] - price).idxmin()
+        elif at == CandleData.CLOSE:
+            ci = np.abs(cs[(cs['TIMESTAMP'] == cs['TIMESTAMP'].iloc[0]) & (cs['EXPIRY_DT'] == cs['EXPIRY_DT'].iloc[0])]['CLOSE'] - price).idxmin()
+            pi = np.abs(ps[(ps['TIMESTAMP'] == ps['TIMESTAMP'].iloc[0]) & (ps['EXPIRY_DT'] == ps['EXPIRY_DT'].iloc[0])]['CLOSE'] - price).idxmin()
+        
+        call_strike = cs['STRIKE_PR'].loc[ci]
+        put_strike = ps['STRIKE_PR'].loc[pi]
+
+        return call_strike, put_strike
+
+    @staticmethod
+    def e2e_straddle_builder(st, nd, spot_data, options_data, at):
+        strike = OptionsBT.get_atm_strike(st, spot_data, options_data, at)
+        df = options_data[(options_data['TIMESTAMP'] >= st) & (options_data['EXPIRY_DT'] == nd) & (options_data['STRIKE_PR'] == strike)]
+        dfg = df.groupby('OPTION_TYP')
+        cdf = dfg.get_group('CE').drop('OPTION_TYP', axis=1).set_index('TIMESTAMP')
+        pdf = dfg.get_group('PE').drop('OPTION_TYP', axis=1).set_index('TIMESTAMP')
+        days = (cdf.index[-1] - cdf.index[0]).days + 1
+        if at == CandleData.OPEN:
+            ce_df = OptionsBT.get_hlc_difference_with_o(cdf.resample(f'{days}D').agg(Defaults.CONVERSION))
+            pe_df = OptionsBT.get_hlc_difference_with_o(pdf.resample(f'{days}D').agg(Defaults.CONVERSION))
+        elif at == CandleData.CLOSE:
+            pass
+        chain = ce_df.merge(pe_df, how='outer',left_index=True, right_index=True, suffixes=['_C', '_P'])
+        sd = spot_data.set_index('TIMESTAMP').resample(f'{days}D').agg(Defaults.CONVERSION)
+        sd['STRIKE'] = strike
+        return sd.merge(chain, how='inner', left_index=True, right_index=True)
+
+    def e2e_straddle(self, symbol, instrument, lot_size, num_lots, stop_loss, brokerage, initial_capital=100000, n_expiry=10, position_type=PositionType.Long):
+        try:
+            symbol = symbol.upper()
+            self.expirys = self.get_last_n_expiry_with_starting_dates(symbol, instrument, n_expiry)
+            st = self.expirys['EX_START'].iloc[0]
+            nd = self.expirys['EXPIRY_DT'].iloc[-1]
+            self.spot_data = self.get_spot_data_between_dates(symbol, instrument,  st, nd)
+
+            if self.get_fno_data_between_dates(symbol, st, nd):
+                self.futures_data = self.fno_DF[self.fno_DF['INSTRUMENT'] == InstrumentType.getfutures(instrument)][Defaults.OPTIONS_COLUMNS]
+                self.options_data = self.fno_DF[self.fno_DF['INSTRUMENT'] == instrument][Defaults.OPTIONS_COLUMNS]
+            else:
+                print('Failed to get fno data')
+                return None
+
+            result = self.expirys.groupby(['EX_START', 'EXPIRY_DT']).apply(lambda x: OptionsBT.e2e_straddle_builder(x['EX_START'].iloc[0], x['EXPIRY_DT'].iloc[0], self.spot_data, self.options_data, CandleData.OPEN))
+
+            self.straddle = result
+
+            return result
+        except Exception as ex:
+            print_exception(ex)
+            return None
+    
+    @classmethod
+    def e2e_banknifty_straddle(cls):
+        op = cls()
+        op.e2e_straddle('BANKNIFTY', InstrumentType.IndexOptions, 40, 10, 10000, 500)
+        return op
+
+    @classmethod
+    def bank_nifty_daily_straddle_current_day(cls):
+        op = cls()
+        df = op.bank_nifty_daily_straddle_for_last_n_days(2)
         print(df)
-
-    def daily_bank_nifty_at_strike(self, strike_price):
-        bndf = self.index_daily_straddle('BANKNIFTY', qty=80, brokerage=500, stop_loss=-2000,
-                                         n_days=2, strike_price=strike_price)
-        print(bndf)
-
-    def bank_nifty_expiry_to_expiry(self, n_expiry=10):
-        ebnf = self.expiry_to_expiry_straddle('BANKNIFTY', 40*4, -10000, 500, n_expiry=n_expiry, initial_capital=100000)
-        dts = datetime.now().strftime('%Y_%m_%d-%H-%M-%S')
-        ebnf.to_excel(f'EXPIRY_TO_EXPIRY_bank_nifty_{n_expiry}_{dts}.xlsx')
-        self.last_DF = ebnf
-        return ebnf
-
-    def nifty_expiry_to_expiry(self, n_expiry=10):
-        ebnf = self.expiry_to_expiry_straddle('NIFTY', 75*4, -15000, 500, n_expiry=n_expiry)
-        dts = datetime.now().strftime('%Y_%m_%d-%H-%M-%S')
-        ebnf.to_excel(f'EXPIRY_TO_EXPIRY_nifty_{n_expiry}_{dts}.xlsx')
-        self.last_DF = ebnf
-        return ebnf
-
 
 if __name__ == '__main__':
     op = OptionsBT()
-    op.bank_nifty_expiry_to_expiry(n_expiry=25)
