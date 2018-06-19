@@ -22,16 +22,16 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="dbtables.py" />
-    <Compile Include="InstrumentType.py">
-      <SubType>Code</SubType>
-    </Compile>
     <Compile Include="MultiIndexColumns.py" />
     <Compile Include="OptionsBT.py" />
-    <Compile Include="PositionType.py">
+    <Compile Include="TypeEnums.py">
       <SubType>Code</SubType>
     </Compile>
-    <Compile Include="Settings.py" />
-    <Compile Include="util.py" />
+    <Compile Include="Defaults.py" />
+    <Compile Include="log.py" />
+    <Compile Include="Utility.py">
+      <SubType>Code</SubType>
+    </Compile>
   </ItemGroup>
   <ItemGroup>
     <Content Include="RefCode.txt" />
