@@ -2,6 +2,7 @@ from datetime import datetime
 import logging
 import sys
 import os
+from pathlib import Path
 import inspect
 
 logger = None
@@ -11,11 +12,9 @@ def start_logger():
     global logger
     logger = logging.getLogger(__name__)
     logger.setLevel(logging.DEBUG)
-    log_format = logging.Formatter(
-        '%(asctime)s|[%(levelname)8s]|[%(module)s.%(name)s.%(funcName)s]|%(lineno)4s|%(message)s')
-
-    file_handler = logging.FileHandler(filename='OptionsBT_{}.log'.format(datetime.now().strftime('%Y-%m-%d_%H-%M-%S')),
-                                       mode='a')
+    log_format = logging.Formatter('%(asctime)s|[%(levelname)8s]|[%(module)s.%(name)s.%(funcName)s]|%(lineno)4s|%(message)s')
+    file_name = Path(__file__).parent.parent.joinpath('Log','OptionsBT_{}.log'.format(datetime.now().strftime('%Y-%m-%d_%H-%M-%S')))
+    file_handler = logging.FileHandler(filename=file_name, mode='a')
     file_handler.setFormatter(log_format)
     logger.addHandler(file_handler)
 

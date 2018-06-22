@@ -3,6 +3,7 @@ from sqlalchemy.sql import select, desc, asc
 from datetime import timedelta, datetime
 import pandas as pd
 import numpy as np
+from pathlib import Path
 
 import dbtables
 from log import print_exception
@@ -21,6 +22,7 @@ class OptionsBT(object):
             self.last_DF = None
             self.last_stm = None
             self.losing_streak_counter = 0
+            self.options_strike_increment = 0
             self.results = []
         except Exception as e:
             print_exception(e)
@@ -178,23 +180,25 @@ class OptionsBT(object):
             self.losing_streak_counter = 0
         return self.losing_streak_counter
     
-    def write_to_excel(self, strategy_df, strategy, symbol, n_row, num_lots, lot_size):
+    def set_losing_streak(self, strategy_df):
         strategy_df['SHORT_LOSE_COUNT'] = strategy_df['NET_SHORT'].apply(self.count_losing_streak)
         strategy_df['LONG_LOSE_COUNT'] = strategy_df['NET_LONG'].apply(self.count_losing_streak)
-        columns = strategy_df.columns
-        strategy_df.style.set_properties(columns[0:9], **{'background-color': '#ABEBC6'}) \
+        return strategy_df
+
+    def write_to_excel(self, strategy, symbol, n_row, num_lots, lot_size):
+        sdf = self.strategy_df
+        columns = sdf.columns
+        fname = '{}_{}_{}_{}_{}_{}.xlsx'.format(symbol, strategy, n_row, num_lots, lot_size,datetime.today().strftime('%Y-%m-%d_%H-%M-%S'))
+        file_name = Path(__file__).parent.parent.joinpath('Result', fname)
+        sdf.style.set_properties(columns[0:9], **{'background-color': '#ABEBC6'}) \
             .set_properties(columns[9:16], **{'background-color': '#F0FFFF'}) \
             .set_properties(columns[16:23], **{'background-color': '#FFE4E1'}) \
             .set_properties(columns[23:26], **{'background-color': '#E0FFFF'}) \
             .set_properties(columns[27:34], **{'background-color': '#F0FFFF'}) \
             .set_properties(columns[34:40], **{'background-color': '#FFE4E1'}) \
             .set_properties(columns[0:], **{'border-color': 'black'}) \
-            .format({'TIMESTAMP': '%Y-%m-%d', 'EXPIRY_DT': '%Y-%m-%d'})\
-            .to_excel('{}_{}_{}_{}_{}_{}.xlsx'.
-                      format(symbol, strategy, n_row, num_lots, lot_size,
-                             get_current_date().strftime('%Y-%m-%d')), engine='openpyxl', index=False)
-
-        return strategy_df
+            .format({'EX_START': '%Y-%m-%d', 'EXPIRY_DT': '%Y-%m-%d'})\
+            .to_excel(file_name, engine='openpyxl', index=False)
 
     def index_daily_straddle(self, symbol, lot_size, num_lots, brokerage, stop_loss, n_days=10, strike_price=None):
         if stop_loss > 0:
@@ -210,12 +214,26 @@ class OptionsBT(object):
         straddle_df = OptionsBT.get_straddle(self.options_data, self.spot_data, strike_price)
         straddle_df.rename(columns={'TIMESTAMP':'EX_START'}, inplace=True)
         straddle_df = OptionsBT.calculate_profit(straddle_df, lot_size, num_lots, brokerage, stop_loss)
-        self.strategy_df = self.write_to_excel(straddle_df, 'DAILY_STRADDLE', symbol, n_days, num_lots, lot_size)
+        self.strategy_df = self.set_losing_streak(straddle_df)
+        self.write_to_excel('DAILY_STRADDLE', symbol, n_days, num_lots, lot_size)
         return self.strategy_df
 
     def bank_nifty_daily_straddle_for_last_n_days(self, n_days):
         bn_df = self.index_daily_straddle('BANKNIFTY', lot_size=40, num_lots=2, brokerage=500, stop_loss=-10000, n_days=n_days)
         return bn_df
+
+    def get_options_strike_increment(self):
+        try:
+            dt = self.options_data['TIMESTAMP'].max()
+            ond = self.options_data[self.options_data['TIMESTAMP'] == dt]['STRIKE_PR']
+            ond.drop_duplicates(inplace=True)
+            ond.sort_values(inplace=True)
+            ond = ond - ond.shift(1)
+            self.options_strike_increment = ond.dropna().mean()
+            return self.options_strike_increment
+        except Exception as ex:
+            print_exception(ex)
+            return None
 
     @staticmethod
     def get_atm_strike(day, spot_data, options_data, at):
@@ -297,7 +315,50 @@ class OptionsBT(object):
             chain = ce_df.merge(pe_df, how='inner',left_index=True, right_index=True, suffixes=['_C', '_P'])
             sd = sdi.set_index('TIMESTAMP').resample(f'{days}D').agg(Defaults.CONVERSION)
             rst = sd.merge(chain, how='inner', left_index=True, right_index=True)
-            self.results.append(rst)
+            return rst
+        except Exception as ex:
+            print_exception(ex)
+            return None
+
+    def long_iron_butterfly_builder(self, st, nd):
+        try:
+            print(f'START DATE : {st} | END DATE {nd}', end='')
+            odi = self.options_data
+            sdi = self.spot_data[(self.spot_data['TIMESTAMP'] >= st) & (self.spot_data['TIMESTAMP'] <= nd)]
+            atm_strike = OptionsBT.get_atm_strike(st, sdi, odi, CandleData.OPEN)
+            osi = self.get_options_strike_increment()
+            #Buy at the money strike straddle
+            cs, ps = atm_strike + osi, atm_strike - osi
+            print(f' | ATM : {atm_strike} | CS : {cs} | PS : {ps}')
+            df = odi[(odi['TIMESTAMP'] >= st) & (odi['EXPIRY_DT'] == nd)]
+            dfg = df.groupby('OPTION_TYP')
+            cf = dfg.get_group('CE').drop('OPTION_TYP', axis=1).set_index('TIMESTAMP')
+            cdf = cf[cf['STRIKE_PR'] == atm_strike]
+            pf = dfg.get_group('PE').drop('OPTION_TYP', axis=1).set_index('TIMESTAMP')
+            pdf = pf[pf['STRIKE_PR'] == atm_strike]
+            days = (cdf.index[-1] - cdf.index[0]).days + 1
+
+            ce_df = cdf.resample(f'{days}D').agg(Defaults.CONVERSION)
+            pe_df = pdf.resample(f'{days}D').agg(Defaults.CONVERSION)
+            ce_df['RTN'] = ce_df['CLOSE'] - ce_df['OPEN']
+            pe_df['RTN'] = pe_df['CLOSE'] - pe_df['OPEN']
+            chain = ce_df.merge(pe_df, how='inner',left_index=True, right_index=True, suffixes=['_CL', '_PL'])
+            columns = chain.columns.insert(0, 'STRIKE')
+            chain['STRIKE'] = atm_strike
+
+            cdfs = cf[cf['STRIKE_PR'] == cs].resample(f'{days}D').agg(Defaults.CONVERSION)
+            pdfs = pf[pf['STRIKE_PR'] == ps].resample(f'{days}D').agg(Defaults.CONVERSION)
+            cdfs['RTN'] = cdfs['CLOSE'] - cdfs['OPEN']
+            pdfs['RTN'] = pdfs['CLOSE'] - pdfs['OPEN']
+            columns = cdfs.columns.insert(0, 'STRIKE')
+            cdfs['STRIKE'] = cs
+            pdfs['STRIKE'] = ps
+            cdfs = cdfs[columns]
+            pdfs = pdfs[columns]
+            chains = cdfs.merge(pdfs, how='inner',left_index=True, right_index=True, suffixes=['_CS', '_PS'])
+            sd = sdi.set_index('TIMESTAMP').resample(f'{days}D').agg(Defaults.CONVERSION)
+            rst = sd.merge(chain, how='inner', left_index=True, right_index=True)
+            rst = pd.concat([rst, chains], axis=1)
             return rst
         except Exception as ex:
             print_exception(ex)
@@ -324,10 +385,11 @@ class OptionsBT(object):
     def e2e_straddle(self, symbol, instrument, lot_size, num_lots, stop_loss, brokerage, n_expiry=10):
         try:
             self.prepare_strategy(symbol, instrument, n_expiry)
-            straddle_df = self.expirys.groupby(['EX_START', 'EXPIRY_DT']).apply(lambda x: OptionsBT.e2e_straddle_builder(x['EX_START'].iloc[0], x['EXPIRY_DT'].iloc[0], self.spot_data, self.options_data, CandleData.OPEN))
+            straddle_df = self.expirys.groupby(['EX_START', 'EXPIRY_DT']).apply(lambda x: self.e2e_straddle_builder(x['EX_START'].iloc[0], x['EXPIRY_DT'].iloc[0], CandleData.OPEN))
             straddle_df = straddle_df.reset_index().drop(['TIMESTAMP'], axis=1)
             straddle_df = OptionsBT.calculate_profit(straddle_df, lot_size, num_lots, brokerage, stop_loss)
-            self.strategy_df = self.write_to_excel(straddle_df, 'E2E_STRADDLE', symbol, n_expiry, num_lots, lot_size)
+            self.strategy_df = self.set_losing_streak(straddle_df)
+            self.write_to_excel('E2E_STRADDLE', symbol, n_expiry, num_lots, lot_size)
             return self.strategy_df
         except Exception as ex:
             print_exception(ex)
@@ -339,9 +401,22 @@ class OptionsBT(object):
             expg = self.expirys.groupby(['EX_START', 'EXPIRY_DT'])
             strangle_df = expg.apply(lambda x: self.e2e_strangle_builder(x['EX_START'].iloc[0], x['EXPIRY_DT'].iloc[0], price, CandleData.OPEN))
             strangle_df = strangle_df.reset_index().drop(['TIMESTAMP'], axis=1)
-            strangle_df = OptionsBT.calculate_profit(strangle_df, lot_size, num_lots, brokerage, stop_loss)
-            self.strategy_df = self.write_to_excel(strangle_df, f'E2E_STRANGLE{price}', symbol, n_expiry, num_lots, lot_size)
+            sdf = OptionsBT.calculate_profit(strangle_df, lot_size, num_lots, brokerage, stop_loss)
+            self.strategy_df = self.set_losing_streak(sdf)
+            self.write_to_excel(f'E2E_STRANGLE{price}', symbol, n_expiry, num_lots, lot_size)
             return self.strategy_df
+        except Exception as ex:
+            print_exception(ex)
+            return None
+
+    def long_iron_butterfly(self, symbol, instrument, lot_size, num_lots, n_expiry):
+        try:
+            self.prepare_strategy(symbol, instrument, n_expiry)
+            expg = self.expirys.groupby(['EX_START', 'EXPIRY_DT'])
+            ib_df = expg.apply(lambda x: self.long_iron_butterfly_builder(x['EX_START'].iloc[0], x['EXPIRY_DT'].iloc[0]))
+            ib_df = ib_df.reset_index().drop(['TIMESTAMP'], axis=1)
+            self.strategy_df = ib_df
+            self.strategy_df = self.write_to_excel(f'E2E_IRB', symbol, n_expiry, num_lots, lot_size)
         except Exception as ex:
             print_exception(ex)
             return None
@@ -376,5 +451,14 @@ class OptionsBT(object):
         op.bank_nifty_daily_straddle_for_last_n_days(ndays)
         return op
 
+    @classmethod
+    def bank_nifty_long_iron_butterfuly(cls, n_expiry=10):
+        op = cls()
+        op.long_iron_butterfly('BANKNIFTY', 'OPTIDX', 40, 5, 10)
+        return op
+
 if __name__ == '__main__':
-    opn = OptionsBT.e2e_nifty_strangle(2, 100)
+    #opn = OptionsBT.e2e_nifty_strangle(24, 100)
+    #opn = OptionsBT.bank_nifty_long_iron_butterfuly(10)
+    #ops = OptionsBT.e2e_banknifty_strangle(100, 60)
+    ops = OptionsBT.e2e_banknifty_straddle(100)
