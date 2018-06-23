@@ -356,7 +356,7 @@ class OptionsBT(object):
             osi = self.get_options_strike_increment()
             #Buy at the money strike straddle
             cs, ps = strike + osi, strike - osi
-            print(f' | ATM : {atm_strike} | CS : {cs} | PS : {ps}')
+            print(f' | ATM : {strike} | CS : {cs} | PS : {ps}')
             df = odi[(odi['TIMESTAMP'] >= st) & (odi['EXPIRY_DT'] == nd) & (odi['STRIKE_PR'] == cs)]
             dfg = df.groupby('OPTION_TYP')
             cdfl = dfg.get_group('CE').drop('OPTION_TYP', axis=1).set_index('TIMESTAMP')
@@ -426,7 +426,9 @@ class OptionsBT(object):
             sdf['NET_PL_LO'] = sdf['PL_LOW'] * num_lots * lot_size
             sdf['NET_PL_HI'] = sdf['PL_HIGH'] * num_lots * lot_size
             sdf['NET_PL_CL'] = sdf['PL_CLOSE'] * num_lots * lot_size
-            sdf['STOP_LOSS_HIT'] = (sdf['PL_LO_IDX'] < sdf['PL_HI_IDX']) & (sdf['NET_PL_LO'] < (stop_loss_threshold * -1)) | (sdf['NET_PL_HI'] < stop_loss)
+            #STOP LOSS HIT FIRST 
+            sdf['STOP_LOSS_HIT'] = (sdf['PL_LO_IDX'] < sdf['PL_HI_IDX']) & (sdf['NET_PL_LO'] < (stop_loss_threshold * -1)) | ((sdf['NET_PL_HI'] < stop_loss) & (sdf['NET_PL_CL'] < (stop_loss * -1)))
+            #TRAILING STOP LOSS, CLOSING PROFIT IS LESS THAN HIGH PROFIT - STOP LOSS THRESHOLD
             sdf['SL_HI_GT_CL'] = sdf['NET_PL_CL'] < (sdf['NET_PL_HI'] - stop_loss_threshold)
             sdf['GROSS'] = np.where(sdf['STOP_LOSS_HIT'], stop_loss * -1, np.where(sdf['SL_HI_GT_CL'], sdf['NET_PL_HI'] - stop_loss, sdf['NET_PL_CL']))
             sdf['BROKERAGE'] = brokerage
@@ -455,14 +457,34 @@ class OptionsBT(object):
         except Exception as ex:
             print_exception(ex)
             return None
-
-    def long_iron_butterfly(self, symbol, instrument, lot_size, num_lots, n_expiry):
+         
+    def long_iron_butterfly(self, symbol, instrument, lot_size, num_lots, margin_per_lot, stop_loss, stop_loss_threshold, brokerage, n_expiry=10):
         try:
             self.prepare_strategy(symbol, instrument, n_expiry)
             expg = self.expirys.groupby(['EX_START', 'EXPIRY_DT'])
-            ib_df = expg.apply(lambda x: self.long_iron_butterfly_builder(x['EX_START'].iloc[0], x['EXPIRY_DT'].iloc[0]))
-            ib_df = ib_df.reset_index().drop(['TIMESTAMP'], axis=1)
-            self.strategy_df = ib_df
+            sdf = expg.apply(lambda x: self.long_iron_butterfly_builder(x['EX_START'].iloc[0], x['EXPIRY_DT'].iloc[0]))
+            sdf = sdf.reset_index().drop(['TIMESTAMP'], axis=1)
+            sdf['LOT_SIZE'] = lot_size
+            sdf['NUM_LOTS'] = num_lots
+            sdf['TOTAL_LOTS'] = num_lots * 2
+            sdf['MARGIN_PER_LOT'] = margin_per_lot
+            sdf['MARGIN_REQUIRED'] = margin_per_lot * sdf['TOTAL_LOTS']
+            sdf['STOP_LOSS'] = stop_loss
+            sdf['STOP_LOSS_TRIGGER'] = stop_loss_threshold
+            sdf['NET_PL_LO'] = sdf['PL_LOW'] * num_lots * lot_size
+            sdf['NET_PL_HI'] = sdf['PL_HIGH'] * num_lots * lot_size
+            sdf['NET_PL_CL'] = sdf['PL_CLOSE'] * num_lots * lot_size
+            sdf['STOP_LOSS_HIT'] = (sdf['PL_LO_IDX'] < sdf['PL_HI_IDX']) & (sdf['NET_PL_LO'] < (stop_loss_threshold * -1)) | ((sdf['NET_PL_HI'] < stop_loss) & (sdf['NET_PL_CL'] < (stop_loss * -1)))
+            sdf['SL_HI_GT_CL'] = sdf['NET_PL_CL'] < (sdf['NET_PL_HI'] - stop_loss_threshold)
+            sdf['GROSS'] = np.where(sdf['STOP_LOSS_HIT'], stop_loss * -1, np.where(sdf['SL_HI_GT_CL'], sdf['NET_PL_HI'] - stop_loss, sdf['NET_PL_CL']))
+            sdf['BROKERAGE'] = brokerage
+            sdf['NET'] = sdf['GROSS'] - brokerage
+            sdf['%'] = (sdf['NET']/sdf['MARGIN_REQUIRED'])*100
+            sdf['LOSE_COUNT'] = sdf['NET'].apply(self.count_losing_streak)
+            sdf['CUM_LOSE_COUNT'] = sdf['NET'].apply(self.count_cumulative_losing_streak)
+            sdf['CUM_NET'] = sdf['NET'].cumsum()
+            self.strategy_df = sdf
+            self.strategy_df = sdf
             self.strategy_df = self.write_to_excel(f'E2E_IRB', symbol, n_expiry, num_lots, lot_size)
         except Exception as ex:
             print_exception(ex)
@@ -501,9 +523,11 @@ class OptionsBT(object):
         return op
 
     @classmethod
-    def bank_nifty_long_iron_butterfuly(cls, n_expiry=10):
+    def bank_nifty_long_iron_butterfuly(cls, n_expiry=10, num_lots=5):
         op = cls()
-        op.long_iron_butterfly('BANKNIFTY', 'OPTIDX', 40, 5, 10)
+        stop_loss = (65000*num_lots*2)*0.015
+        stop_loss_threshold = stop_loss - 1000
+        op.long_iron_butterfly('BANKNIFTY', InstrumentType.IndexOptions, lot_size=40, num_lots=num_lots, margin_per_lot=65000, stop_loss=stop_loss, stop_loss_threshold=stop_loss_threshold, brokerage=100, n_expiry=n_expiry)
         return op
 
 if __name__ == '__main__':
@@ -511,5 +535,8 @@ if __name__ == '__main__':
     #opn = OptionsBT.bank_nifty_long_iron_butterfuly(10)
     #ops = OptionsBT.e2e_banknifty_strangle(100, 60)
     #ops = OptionsBT.e2e_banknifty_straddle(104, 2)
+    #for x in range(1, 9):
+    #    OptionsBT.e2e_banknifty_straddle(104, x)
     for x in range(1, 9):
+        OptionsBT.bank_nifty_long_iron_butterfuly(n_expiry=104, num_lots=x)
         OptionsBT.e2e_banknifty_straddle(104, x)
