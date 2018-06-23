@@ -190,15 +190,20 @@ class OptionsBT(object):
         columns = sdf.columns
         fname = '{}_{}_{}_{}_{}_{}.xlsx'.format(symbol, strategy, n_row, num_lots, lot_size,datetime.today().strftime('%Y-%m-%d_%H-%M-%S'))
         file_name = Path(__file__).parent.parent.joinpath('Result', fname)
-        sdf.style.set_properties(columns[0:9], **{'background-color': '#ABEBC6'}) \
-            .set_properties(columns[9:16], **{'background-color': '#F0FFFF'}) \
-            .set_properties(columns[16:23], **{'background-color': '#FFE4E1'}) \
-            .set_properties(columns[23:26], **{'background-color': '#E0FFFF'}) \
-            .set_properties(columns[27:34], **{'background-color': '#F0FFFF'}) \
-            .set_properties(columns[34:40], **{'background-color': '#FFE4E1'}) \
-            .set_properties(columns[0:], **{'border-color': 'black'}) \
-            .format({'EX_START': '%Y-%m-%d', 'EXPIRY_DT': '%Y-%m-%d'})\
-            .to_excel(file_name, engine='openpyxl', index=False)
+        try:
+            sdf.style.set_properties(Defaults.CANDLE_COLUMNS, **{'background-color': '#ABEBC6'}) \
+                .set_properties(Defaults.CALL_CANDLE_COLUMNS, **{'background-color': '#F0FFFF'}) \
+                .set_properties(Defaults.PUT_CANDLE_COLUMNS, **{'background-color': '#FFE4E1'}) \
+                .set_properties(Defaults.PL_CANDLE_COLUMNS, **{'background-color': '#E0FFFF'})\
+                .set_properties(Defaults.STOP_LOSS_TRUTH_COLUMNS, **{'background-color': '#F0FFFF'})\
+                .set_properties(Defaults.CONSTANT_COLUMNS, **{'background-color': '#FFE4E1'})\
+                .set_properties(Defaults.PL_NET_COLUMNS, **{'background-color': '#E0FFFF'})\
+                .set_properties(Defaults.NET_COLUMNS, **{'background-color': '#ABEBC6'})\
+                .set_properties(columns[0:], **{'border-color': 'black'}) \
+                .format({'EX_START': '%Y-%m-%d', 'EXPIRY_DT': '%Y-%m-%d'})\
+                .to_excel(file_name, engine='openpyxl', index=False)
+        except:
+            sdf.to_excel(file_name, engine='openpyxl', index=False)
 
     def index_daily_straddle(self, symbol, lot_size, num_lots, brokerage, stop_loss, n_days=10, strike_price=None):
         if stop_loss > 0:
@@ -275,20 +280,28 @@ class OptionsBT(object):
             dfg = df.groupby('OPTION_TYP')
             cdf = dfg.get_group('CE').drop('OPTION_TYP', axis=1).set_index('TIMESTAMP')
             pdf = dfg.get_group('PE').drop('OPTION_TYP', axis=1).set_index('TIMESTAMP')
+            #Get number of days between start date and end date
             days = (cdf.index[-1] - cdf.index[0]).days + 1
-            if at == CandleData.OPEN:
-                ce_df = OptionsBT.get_hlc_difference_with_o(cdf.resample(f'{days}D').agg(Defaults.CONVERSION))
-                pe_df = OptionsBT.get_hlc_difference_with_o(pdf.resample(f'{days}D').agg(Defaults.CONVERSION))
-            elif at == CandleData.CLOSE:
-                pass
-            chain = ce_df.merge(pe_df, how='inner',left_index=True, right_index=True, suffixes=['_C', '_P'])
+            co = cdf['OPEN'].iloc[0] #Call open price
+            po = pdf['OPEN'].iloc[0] #Put open price
+            #Create chain
+            chain = cdf.merge(pdf, how='inner', left_index=True, right_index=True, suffixes=['_C', '_P'])
+            #Calculate end of term position status
+            chain['DPL'] = (co - chain['CLOSE_C']) + (po - chain['CLOSE_P'])
+            chain['PL_OPEN'] = 0
+            chain['PL_LOW'] = chain['DPL']
+            chain['PL_HIGH'] = chain['DPL']
+            chain['PL_CLOSE'] = chain['DPL']
+            rchain = chain.resample(f'{days}D').agg(Defaults.STRADDLE_CONVERSION)
+            rchain['PL_LO_IDX'] = chain.reset_index()['DPL'].idxmin()
+            rchain['PL_HI_IDX'] = chain.reset_index()['DPL'].idxmax()
             sd = sdi.set_index('TIMESTAMP').resample(f'{days}D').agg(Defaults.CONVERSION)
             sd['STRIKE'] = strike
-            return sd.merge(chain, how='inner', left_index=True, right_index=True)
+            return sd.merge(rchain, how='inner', left_index=True, right_index=True)
         except Exception as ex:
             print_exception(ex)
             return None
-
+    
     def e2e_strangle_builder(self, st, nd, price, at):
         try:
             print(f'START DATE : {st} | END DATE {nd}')
@@ -382,13 +395,31 @@ class OptionsBT(object):
             print_exception(ex)
             return None
 
-    def e2e_straddle(self, symbol, instrument, lot_size, num_lots, stop_loss, brokerage, n_expiry=10):
+    def e2e_straddle(self, symbol, instrument, lot_size, num_lots, margin_per_lot, stop_loss, stop_loss_threshold, brokerage, n_expiry=10):
         try:
             self.prepare_strategy(symbol, instrument, n_expiry)
-            straddle_df = self.expirys.groupby(['EX_START', 'EXPIRY_DT']).apply(lambda x: self.e2e_straddle_builder(x['EX_START'].iloc[0], x['EXPIRY_DT'].iloc[0], CandleData.OPEN))
-            straddle_df = straddle_df.reset_index().drop(['TIMESTAMP'], axis=1)
-            straddle_df = OptionsBT.calculate_profit(straddle_df, lot_size, num_lots, brokerage, stop_loss)
-            self.strategy_df = self.set_losing_streak(straddle_df)
+            sdf = self.expirys.groupby(['EX_START', 'EXPIRY_DT']).apply(lambda x: self.e2e_straddle_builder(x['EX_START'].iloc[0], x['EXPIRY_DT'].iloc[0], CandleData.OPEN))
+            sdf = sdf.reset_index().drop(['TIMESTAMP'], axis=1)
+            sdf['LOT_SIZE'] = lot_size
+            sdf['NUM_LOTS'] = num_lots
+            sdf['TOTAL_LOTS'] = num_lots * 2
+            sdf['MARGIN_PER_LOT'] = margin_per_lot
+            sdf['MARGIN_REQUIRED'] = margin_per_lot * sdf['TOTAL_LOTS']
+            sdf['STOP_LOSS'] = stop_loss
+            sdf['STOP_LOSS_TRIGGER'] = stop_loss_threshold
+            sdf['NET_PL_LO'] = sdf['PL_LOW'] * num_lots * lot_size
+            sdf['NET_PL_HI'] = sdf['PL_HIGH'] * num_lots * lot_size
+            sdf['NET_PL_CL'] = sdf['PL_CLOSE'] * num_lots * lot_size
+            sdf['STOP_LOSS_HIT'] = (sdf['PL_LO_IDX'] < sdf['PL_HI_IDX']) & (sdf['NET_PL_LO'] < (stop_loss_threshold * -1)) | (sdf['NET_PL_HI'] < stop_loss)
+            sdf['SL_HI_GT_CL'] = sdf['NET_PL_CL'] < (sdf['NET_PL_HI'] - stop_loss_threshold)
+            sdf['GROSS'] = np.where(sdf['STOP_LOSS_HIT'], stop_loss * -1, np.where(sdf['SL_HI_GT_CL'], sdf['NET_PL_HI'] - stop_loss, sdf['NET_PL_CL']))
+            sdf['BROKERAGE'] = brokerage
+            sdf['NET'] = sdf['GROSS'] - brokerage
+            sdf['%'] = (sdf['NET']/sdf['MARGIN_REQUIRED'])*100
+            sdf['LOSE_COUNT'] = sdf['NET'].apply(self.count_losing_streak)
+            sdf['CUM_LOSE_COUNT'] = sdf['LOSE_COUNT'].cumsum()
+            sdf['CUM_NET'] = sdf['NET'].cumsum()
+            self.strategy_df = sdf
             self.write_to_excel('E2E_STRADDLE', symbol, n_expiry, num_lots, lot_size)
             return self.strategy_df
         except Exception as ex:
@@ -422,9 +453,11 @@ class OptionsBT(object):
             return None
 
     @classmethod
-    def e2e_banknifty_straddle(cls, num_expiry):
+    def e2e_banknifty_straddle(cls, num_expiry, num_lots=5):
         op = cls()
-        op.e2e_straddle('BANKNIFTY', InstrumentType.IndexOptions, 40, 10, 10000, 100, n_expiry=num_expiry)
+        stop_loss = (65000*num_lots*2)*0.015
+        stop_loss_threshold = stop_loss - 1000
+        op.e2e_straddle('BANKNIFTY', InstrumentType.IndexOptions, 40, num_lots=num_lots, margin_per_lot=65000, stop_loss=stop_loss, stop_loss_threshold=stop_loss_threshold, brokerage=100, n_expiry=num_expiry)
         return op
     
     @classmethod
@@ -461,4 +494,6 @@ if __name__ == '__main__':
     #opn = OptionsBT.e2e_nifty_strangle(24, 100)
     #opn = OptionsBT.bank_nifty_long_iron_butterfuly(10)
     #ops = OptionsBT.e2e_banknifty_strangle(100, 60)
-    ops = OptionsBT.e2e_banknifty_straddle(100)
+    #ops = OptionsBT.e2e_banknifty_straddle(104, 2)
+    for x in range(1, 9):
+        OptionsBT.e2e_banknifty_straddle(104, x)
