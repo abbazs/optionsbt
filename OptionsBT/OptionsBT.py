@@ -22,6 +22,7 @@ class OptionsBT(object):
             self.last_DF = None
             self.last_stm = None
             self.losing_streak_counter = 0
+            self.cum_losing_streak_counter = 0
             self.options_strike_increment = 0
             self.results = []
         except Exception as e:
@@ -180,6 +181,11 @@ class OptionsBT(object):
             self.losing_streak_counter = 0
         return self.losing_streak_counter
     
+    def count_cumulative_losing_streak(self, x):
+        if x < 0:
+            self.cum_losing_streak_counter += 1
+        return self.cum_losing_streak_counter
+
     def set_losing_streak(self, strategy_df):
         strategy_df['SHORT_LOSE_COUNT'] = strategy_df['NET_SHORT'].apply(self.count_losing_streak)
         strategy_df['LONG_LOSE_COUNT'] = strategy_df['NET_LONG'].apply(self.count_losing_streak)
@@ -240,10 +246,9 @@ class OptionsBT(object):
             print_exception(ex)
             return None
 
-    @staticmethod
-    def get_atm_strike(day, spot_data, options_data, at):
-        od_df = options_data[options_data['TIMESTAMP'] >= day]
-        sd_df = spot_data[spot_data['TIMESTAMP'] >= day]
+    def get_atm_strike(self, day, at=CandleData.OPEN):
+        od_df = self.options_data[self.options_data['TIMESTAMP'] >= day]
+        sd_df = self.spot_data[self.spot_data['TIMESTAMP'] >= day]
         if at == CandleData.OPEN:
             spot = sd_df['OPEN'].iloc[0]
         elif at == CandleData.CLOSE:
@@ -275,7 +280,7 @@ class OptionsBT(object):
             print(f'START DATE : {st} | END DATE {nd}')
             odi = self.options_data
             sdi = self.spot_data[(self.spot_data['TIMESTAMP'] >= st) & (self.spot_data['TIMESTAMP'] <= nd)]
-            strike = OptionsBT.get_atm_strike(st, sdi, odi, at)
+            strike = self.get_atm_strike(st)
             df = odi[(odi['TIMESTAMP'] >= st) & (odi['EXPIRY_DT'] == nd) & (odi['STRIKE_PR'] == strike)]
             dfg = df.groupby('OPTION_TYP')
             cdf = dfg.get_group('CE').drop('OPTION_TYP', axis=1).set_index('TIMESTAMP')
@@ -338,41 +343,52 @@ class OptionsBT(object):
             print(f'START DATE : {st} | END DATE {nd}', end='')
             odi = self.options_data
             sdi = self.spot_data[(self.spot_data['TIMESTAMP'] >= st) & (self.spot_data['TIMESTAMP'] <= nd)]
-            atm_strike = OptionsBT.get_atm_strike(st, sdi, odi, CandleData.OPEN)
+            strike = self.get_atm_strike(st)
+            df = odi[(odi['TIMESTAMP'] >= st) & (odi['EXPIRY_DT'] == nd) & (odi['STRIKE_PR'] == strike)]
+            dfg = df.groupby('OPTION_TYP')
+            cdf = dfg.get_group('CE').drop('OPTION_TYP', axis=1).set_index('TIMESTAMP')
+            pdf = dfg.get_group('PE').drop('OPTION_TYP', axis=1).set_index('TIMESTAMP')
+            #Get number of days between start date and end date
+            days = (cdf.index[-1] - cdf.index[0]).days + 1
+            co = cdf['OPEN'].iloc[0] #Call open price
+            po = pdf['OPEN'].iloc[0] #Put open price
+            #Get strikes for short strangle
             osi = self.get_options_strike_increment()
             #Buy at the money strike straddle
-            cs, ps = atm_strike + osi, atm_strike - osi
+            cs, ps = strike + osi, strike - osi
             print(f' | ATM : {atm_strike} | CS : {cs} | PS : {ps}')
-            df = odi[(odi['TIMESTAMP'] >= st) & (odi['EXPIRY_DT'] == nd)]
+            df = odi[(odi['TIMESTAMP'] >= st) & (odi['EXPIRY_DT'] == nd) & (odi['STRIKE_PR'] == cs)]
             dfg = df.groupby('OPTION_TYP')
-            cf = dfg.get_group('CE').drop('OPTION_TYP', axis=1).set_index('TIMESTAMP')
-            cdf = cf[cf['STRIKE_PR'] == atm_strike]
-            pf = dfg.get_group('PE').drop('OPTION_TYP', axis=1).set_index('TIMESTAMP')
-            pdf = pf[pf['STRIKE_PR'] == atm_strike]
-            days = (cdf.index[-1] - cdf.index[0]).days + 1
+            cdfl = dfg.get_group('CE').drop('OPTION_TYP', axis=1).set_index('TIMESTAMP')
+            ccolumns = cdfl.columns.insert(0, 'STRIKE')
+            cdfl['STRIKE'] = cs
+            df = odi[(odi['TIMESTAMP'] >= st) & (odi['EXPIRY_DT'] == nd) & (odi['STRIKE_PR'] == ps)]
+            dfg = df.groupby('OPTION_TYP')
+            pdfr = dfg.get_group('PE').drop('OPTION_TYP', axis=1).set_index('TIMESTAMP')
+            pdfr['STRIKE'] = ps
+            col = cdfl['OPEN'].iloc[0] #Call open price of short side
+            por = pdfr['OPEN'].iloc[0] #Put open price of short side
 
-            ce_df = cdf.resample(f'{days}D').agg(Defaults.CONVERSION)
-            pe_df = pdf.resample(f'{days}D').agg(Defaults.CONVERSION)
-            ce_df['RTN'] = ce_df['CLOSE'] - ce_df['OPEN']
-            pe_df['RTN'] = pe_df['CLOSE'] - pe_df['OPEN']
-            chain = ce_df.merge(pe_df, how='inner',left_index=True, right_index=True, suffixes=['_CL', '_PL'])
-            columns = chain.columns.insert(0, 'STRIKE')
-            chain['STRIKE'] = atm_strike
+            #Create chain
+            ln_chain = cdf.merge(pdf, how='inner', left_index=True, right_index=True, suffixes=['_C', '_P'])
+            columns = ln_chain.columns.insert(0, 'STRIKE')
+            ln_chain['STRIKE'] = strike
+            st_chain = cdfl[ccolumns].merge(pdfr[ccolumns], how='inner', left_index=True, right_index=True, suffixes=['_CL', '_PR'])
+            chain = ln_chain.merge(st_chain, how='inner', left_index=True, right_index=True, suffixes=['_CL', '_PR'])
 
-            cdfs = cf[cf['STRIKE_PR'] == cs].resample(f'{days}D').agg(Defaults.CONVERSION)
-            pdfs = pf[pf['STRIKE_PR'] == ps].resample(f'{days}D').agg(Defaults.CONVERSION)
-            cdfs['RTN'] = cdfs['CLOSE'] - cdfs['OPEN']
-            pdfs['RTN'] = pdfs['CLOSE'] - pdfs['OPEN']
-            columns = cdfs.columns.insert(0, 'STRIKE')
-            cdfs['STRIKE'] = cs
-            pdfs['STRIKE'] = ps
-            cdfs = cdfs[columns]
-            pdfs = pdfs[columns]
-            chains = cdfs.merge(pdfs, how='inner',left_index=True, right_index=True, suffixes=['_CS', '_PS'])
+            #Calculate end of term position status
+                            #-----------#BUY AT THE MONEY STRIKE------------####-------------SELL OTM STRIKE-----------------------#
+            chain['DPL'] = (chain['CLOSE_C'] - co) + (chain['CLOSE_P'] - po) + (col - chain['CLOSE_CL']) + (por - chain['CLOSE_PR'])
+            chain['PL_OPEN'] = 0
+            chain['PL_LOW'] = chain['DPL']
+            chain['PL_HIGH'] = chain['DPL']
+            chain['PL_CLOSE'] = chain['DPL']
+            rchain = chain.resample(f'{days}D').agg(Defaults.IRON_BUTTERFLY_CONVERSION)
+            rchain['PL_LO_IDX'] = chain.reset_index()['DPL'].idxmin()
+            rchain['PL_HI_IDX'] = chain.reset_index()['DPL'].idxmax()
             sd = sdi.set_index('TIMESTAMP').resample(f'{days}D').agg(Defaults.CONVERSION)
-            rst = sd.merge(chain, how='inner', left_index=True, right_index=True)
-            rst = pd.concat([rst, chains], axis=1)
-            return rst
+            sd['STRIKE'] = strike
+            return sd.merge(rchain, how='inner', left_index=True, right_index=True)
         except Exception as ex:
             print_exception(ex)
             return None
@@ -417,7 +433,7 @@ class OptionsBT(object):
             sdf['NET'] = sdf['GROSS'] - brokerage
             sdf['%'] = (sdf['NET']/sdf['MARGIN_REQUIRED'])*100
             sdf['LOSE_COUNT'] = sdf['NET'].apply(self.count_losing_streak)
-            sdf['CUM_LOSE_COUNT'] = sdf['LOSE_COUNT'].cumsum()
+            sdf['CUM_LOSE_COUNT'] = sdf['NET'].apply(self.count_cumulative_losing_streak)
             sdf['CUM_NET'] = sdf['NET'].cumsum()
             self.strategy_df = sdf
             self.write_to_excel('E2E_STRADDLE', symbol, n_expiry, num_lots, lot_size)

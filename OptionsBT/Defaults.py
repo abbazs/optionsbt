@@ -25,3 +25,5 @@ CONVERSION = {'OPEN': 'first', 'HIGH': 'max', 'LOW': 'min', 'CLOSE': 'last'}
 CHAIN_CONVERSION = {'OPEN_C': 'first', 'HIGH_C': 'max', 'LOW_C': 'min', 'CLOSE_C': 'last', 'OPEN_P': 'first', 'HIGH_P': 'max', 'LOW_P': 'min', 'CLOSE_P': 'last'}
 
 STRADDLE_CONVERSION = {'OPEN_C': 'first', 'HIGH_C': 'max', 'LOW_C': 'min', 'CLOSE_C': 'last', 'OPEN_P': 'first', 'HIGH_P': 'max', 'LOW_P': 'min', 'CLOSE_P': 'last','PL_OPEN':'first', 'PL_HIGH':'max', 'PL_LOW':'min', 'PL_CLOSE':'last'}
+
+IRON_BUTTERFLY_CONVERSION = {'OPEN_C':'first', 'HIGH_C':'max', 'LOW_C':'min', 'CLOSE_C':'last', 'OPEN_P':'first', 'HIGH_P':'max', 'LOW_P':'min', 'CLOSE_P':'last', 'STRIKE_CL':'first', 'OPEN_CL':'first', 'HIGH_CL':'max', 'LOW_CL':'min', 'CLOSE_CL':'last', 'STRIKE_PR':'first', 'OPEN_PR':'first', 'HIGH_PR':'max', 'LOW_PR':'min', 'CLOSE_PR':'last', 'PL_OPEN':'first', 'PL_HIGH':'max', 'PL_LOW':'min', 'PL_CLOSE':'last'}
