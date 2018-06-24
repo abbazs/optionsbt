@@ -4,13 +4,14 @@
     <SchemaVersion>2.0</SchemaVersion>
     <ProjectGuid>92dc76eb-f0bb-4cf2-82c3-605b8f7c85d4</ProjectGuid>
     <ProjectHome>.</ProjectHome>
-    <StartupFile>OptionsBT.py</StartupFile>
+    <StartupFile>runner.py</StartupFile>
     <SearchPath>
     </SearchPath>
     <WorkingDirectory>.</WorkingDirectory>
     <OutputPath>.</OutputPath>
     <Name>OptionsBT</Name>
     <RootNamespace>OptionsBT</RootNamespace>
+    <IsWindowsApplication>False</IsWindowsApplication>
   </PropertyGroup>
   <PropertyGroup Condition=" '$(Configuration)' == 'Debug' ">
     <DebugSymbols>true</DebugSymbols>
@@ -24,6 +25,9 @@
     <Compile Include="dbtables.py" />
     <Compile Include="MultiIndexColumns.py" />
     <Compile Include="OptionsBT.py" />
+    <Compile Include="runner.py">
+      <SubType>Code</SubType>
+    </Compile>
     <Compile Include="TypeEnums.py">
       <SubType>Code</SubType>
     </Compile>

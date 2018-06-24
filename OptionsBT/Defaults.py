@@ -20,10 +20,14 @@ STOP_LOSS_TRUTH_COLUMNS = ['STOP_LOSS_HIT', 'SL_HI_GT_CL']
 
 NET_COLUMNS = ['NET', '%', 'LOSE_COUNT', 'CUM_LOSE_COUNT', 'CUM_NET']
 
-CONVERSION = {'OPEN': 'first', 'HIGH': 'max', 'LOW': 'min', 'CLOSE': 'last'}
+CONVERSION = {'OPEN':'first', 'HIGH':'max', 'LOW':'min', 'CLOSE':'last'}
 
-CHAIN_CONVERSION = {'OPEN_C': 'first', 'HIGH_C': 'max', 'LOW_C': 'min', 'CLOSE_C': 'last', 'OPEN_P': 'first', 'HIGH_P': 'max', 'LOW_P': 'min', 'CLOSE_P': 'last'}
+CHAIN_CONVERSION = {'OPEN_C':'first', 'HIGH_C':'max', 'LOW_C':'min', 'CLOSE_C':'last', 'OPEN_P':'first', 'HIGH_P':'max', 'LOW_P':'min', 'CLOSE_P':'last'}
 
-STRADDLE_CONVERSION = {'OPEN_C': 'first', 'HIGH_C': 'max', 'LOW_C': 'min', 'CLOSE_C': 'last', 'OPEN_P': 'first', 'HIGH_P': 'max', 'LOW_P': 'min', 'CLOSE_P': 'last','PL_OPEN':'first', 'PL_HIGH':'max', 'PL_LOW':'min', 'PL_CLOSE':'last'}
+STRADDLE_CONVERSION = {'OPEN_C':'first', 'HIGH_C': 'max', 'LOW_C':'min', 'CLOSE_C':'last', 'OPEN_P':'first', 'HIGH_P':'max', 'LOW_P':'min', 'CLOSE_P':'last','PL_OPEN':'first', 'PL_HIGH':'max', 'PL_LOW':'min', 'PL_CLOSE':'last'}
+
+STRANGLE_CONVERSION = {'STRIKE_C':'first', 'OPEN_C':'first', 'HIGH_C':'max', 'LOW_C':'min', 'CLOSE_C':'last', 'STRIKE_P':'first', 'OPEN_P':'first', 'HIGH_P':'max', 'LOW_P':'min', 'CLOSE_P':'last', 'PL_OPEN':'first', 'PL_HIGH':'max', 'PL_LOW':'min', 'PL_CLOSE':'last'}
 
 IRON_BUTTERFLY_CONVERSION = {'OPEN_C':'first', 'HIGH_C':'max', 'LOW_C':'min', 'CLOSE_C':'last', 'OPEN_P':'first', 'HIGH_P':'max', 'LOW_P':'min', 'CLOSE_P':'last', 'STRIKE_CL':'first', 'OPEN_CL':'first', 'HIGH_CL':'max', 'LOW_CL':'min', 'CLOSE_CL':'last', 'STRIKE_PR':'first', 'OPEN_PR':'first', 'HIGH_PR':'max', 'LOW_PR':'min', 'CLOSE_PR':'last', 'PL_OPEN':'first', 'PL_HIGH':'max', 'PL_LOW':'min', 'PL_CLOSE':'last'}
+
+CALENDAR_SPREAD_CONVERSION = {'OPEN_C':'first', 'HIGH_C':'max', 'LOW_C':'min', 'CLOSE_C':'last', 'OPEN_P':'first', 'HIGH_P':'max', 'LOW_P':'min', 'CLOSE_P':'last', 'OPEN_CN':'first', 'HIGH_CN':'max', 'LOW_CN':'min', 'CLOSE_CN':'last', 'OPEN_PN':'first', 'HIGH_PN':'max', 'LOW_PN':'min', 'CLOSE_PN':'last', 'PL_OPEN':'first', 'PL_HIGH':'max', 'PL_LOW':'min', 'PL_CLOSE':'last'}

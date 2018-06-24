@@ -1,9 +1,9 @@
 from enum import Enum
 
-class PositionType(Enum):
+class PositionType(object):
     """Represents enums of position types"""
-    Long = 1
-    Short = 2
+    LONG = "long"
+    SHORT = "short"
 
 class CandleData(Enum):
     """Candle Data enum"""

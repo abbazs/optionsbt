@@ -159,6 +159,36 @@ class OptionsBT(object):
         strategy['DTE'] = (strategy['EXPIRY_DT'] - strategy['EX_START']).dt.days
         return strategy[columns]
 
+    def calculate_profit_2(self, sdf, lot_size, num_lots, margin_per_lot, stop_loss, stop_loss_threshold, brokerage):
+        try:
+            sdf['LOT_SIZE'] = lot_size
+            sdf['NUM_LOTS'] = num_lots
+            sdf['TOTAL_LOTS'] = num_lots * 2
+            sdf['MARGIN_PER_LOT'] = margin_per_lot
+            sdf['MARGIN_REQUIRED'] = margin_per_lot * sdf['TOTAL_LOTS']
+            sdf['STOP_LOSS'] = stop_loss
+            sdf['STOP_LOSS_TRIGGER'] = stop_loss_threshold
+            sdf['NET_PL_LO'] = sdf['PL_LOW'] * num_lots * lot_size
+            sdf['NET_PL_HI'] = sdf['PL_HIGH'] * num_lots * lot_size
+            sdf['NET_PL_CL'] = sdf['PL_CLOSE'] * num_lots * lot_size
+            ####################### STOP LOSS HIT FIRST?*LOW PL INDEX IS < HI PL INDEX & LOW PL IS < STOP LOSS THRESHOLD**OR**HIGHEST PL IS < STOP LOSS & CLOSING PROFIT IS < STOP LOSS ###########
+            #################################################################### When highest PL < stop loss means system would not have trailed stop loss and would have hit the default stop loss
+            sdf['STOP_LOSS_HIT'] = (sdf['PL_LO_IDX'] < sdf['PL_HI_IDX']) & (sdf['NET_PL_LO'] < (stop_loss_threshold * -1))
+            #TRAILING STOP LOSS, CLOSING PROFIT IS LESS THAN HIGH PROFIT - STOP LOSS THRESHOLD
+            sdf['SL_HI_GT_CL'] = sdf['NET_PL_CL'] < (sdf['NET_PL_HI'] - stop_loss_threshold)
+            #At any given period it would not be possible to exactly stop at the stop loss, but what ever was the loss at end of period
+            sdf['GROSS'] = np.where(sdf['STOP_LOSS_HIT'], sdf['NET_PL_LO'], np.where(sdf['SL_HI_GT_CL'], sdf['NET_PL_HI'] - stop_loss, sdf['NET_PL_CL']))
+            sdf['BROKERAGE'] = brokerage
+            sdf['NET'] = sdf['GROSS'] - brokerage
+            sdf['%'] = (sdf['NET']/sdf['MARGIN_REQUIRED'])*100
+            sdf['LOSE_COUNT'] = sdf['NET'].apply(self.count_losing_streak)
+            sdf['CUM_LOSE_COUNT'] = sdf['NET'].apply(self.count_cumulative_losing_streak)
+            sdf['CUM_NET'] = sdf['NET'].cumsum()
+            return sdf
+        except Exception as e:
+            print_exception(e)
+            return None
+
     @staticmethod
     def get_straddle(options_df, spot_df, strike_price=None):
         try:
@@ -275,7 +305,7 @@ class OptionsBT(object):
             print_exception(ex)
             return None
     
-    def e2e_straddle_builder(self, st, nd, at):
+    def e2e_straddle_builder(self, st, nd, position_type):
         try:
             print(f'START DATE : {st} | END DATE {nd}')
             odi = self.options_data
@@ -291,8 +321,13 @@ class OptionsBT(object):
             po = pdf['OPEN'].iloc[0] #Put open price
             #Create chain
             chain = cdf.merge(pdf, how='inner', left_index=True, right_index=True, suffixes=['_C', '_P'])
+
             #Calculate end of term position status
-            chain['DPL'] = (co - chain['CLOSE_C']) + (po - chain['CLOSE_P'])
+            if position_type == PositionType.SHORT:
+                chain['DPL'] = (co - chain['CLOSE_C']) + (po - chain['CLOSE_P'])
+            elif position_type == PositionType.LONG:
+                chain['DPL'] = (chain['CLOSE_C'] - co) + (chain['CLOSE_P'] - po)
+
             chain['PL_OPEN'] = 0
             chain['PL_LOW'] = chain['DPL']
             chain['PL_HIGH'] = chain['DPL']
@@ -307,38 +342,45 @@ class OptionsBT(object):
             print_exception(ex)
             return None
     
-    def e2e_strangle_builder(self, st, nd, price, at):
+    def e2e_strangle_builder(self, st, nd, price):
         try:
             print(f'START DATE : {st} | END DATE {nd}')
             odi = self.options_data
             sdi = self.spot_data[(self.spot_data['TIMESTAMP'] >= st) & (self.spot_data['TIMESTAMP'] <= nd)]
-            cs, ps = OptionsBT.get_strikes_at_price(st, odi, price, at)
-            df = odi[(odi['TIMESTAMP'] >= st) & (odi['EXPIRY_DT'] == nd)]
+            cs, ps = OptionsBT.get_strikes_at_price(st, odi, price, CandleData.OPEN)
+            df = odi[(odi['TIMESTAMP'] >= st) & (odi['EXPIRY_DT'] == nd) & (odi['STRIKE_PR'] == cs)]
             dfg = df.groupby('OPTION_TYP')
-            cdf = dfg.get_group('CE').drop('OPTION_TYP', axis=1).set_index('TIMESTAMP')
-            cdf = cdf[cdf['STRIKE_PR'] == cs]
-            pdf = dfg.get_group('PE').drop('OPTION_TYP', axis=1).set_index('TIMESTAMP')
-            pdf = pdf[pdf['STRIKE_PR'] == ps]
-            days = (cdf.index[-1] - cdf.index[0]).days + 1
-            if at == CandleData.OPEN:
-                ce_df = OptionsBT.get_hlc_difference_with_o(cdf.resample(f'{days}D').agg(Defaults.CONVERSION))
-                pe_df = OptionsBT.get_hlc_difference_with_o(pdf.resample(f'{days}D').agg(Defaults.CONVERSION))
-            elif at == CandleData.CLOSE:
-                pass
-            columns = ce_df.columns.insert(0, 'STRIKE')
-            ce_df['STRIKE'] = cs
-            pe_df['STRIKE'] = ps
-            ce_df = ce_df[columns]
-            pe_df = pe_df[columns]
-            chain = ce_df.merge(pe_df, how='inner',left_index=True, right_index=True, suffixes=['_C', '_P'])
+            cdfl = dfg.get_group('CE').drop('OPTION_TYP', axis=1).set_index('TIMESTAMP')
+            ccolumns = cdfl.columns.insert(0, 'STRIKE')
+            cdfl['STRIKE'] = cs
+            df = odi[(odi['TIMESTAMP'] >= st) & (odi['EXPIRY_DT'] == nd) & (odi['STRIKE_PR'] == ps)]
+            dfg = df.groupby('OPTION_TYP')
+            pdfr = dfg.get_group('PE').drop('OPTION_TYP', axis=1).set_index('TIMESTAMP')
+            pdfr['STRIKE'] = ps
+            col = cdfl['OPEN'].iloc[0] #Call open price of short side
+            por = pdfr['OPEN'].iloc[0] #Put open price of short side
+            #Get number of days between start date and end date
+            days = (cdfl.index[-1] - cdfl.index[0]).days + 1
+            co = cdfl['OPEN'].iloc[0] #Call open price
+            po = pdfr['OPEN'].iloc[0] #Put open price
+            #Create chain
+            chain = cdfl[ccolumns].merge(pdfr[ccolumns], how='inner', left_index=True, right_index=True, suffixes=['_C', '_P'])
+            self.last_DF = chain
+            chain['DPL'] = (co - chain['CLOSE_C']) + (po - chain['CLOSE_P'])
+            chain['PL_OPEN'] = 0
+            chain['PL_LOW'] = chain['DPL']
+            chain['PL_HIGH'] = chain['DPL']
+            chain['PL_CLOSE'] = chain['DPL']
+            rchain = chain.resample(f'{days}D').agg(Defaults.STRANGLE_CONVERSION)
+            rchain['PL_LO_IDX'] = chain.reset_index()['DPL'].idxmin()
+            rchain['PL_HI_IDX'] = chain.reset_index()['DPL'].idxmax()
             sd = sdi.set_index('TIMESTAMP').resample(f'{days}D').agg(Defaults.CONVERSION)
-            rst = sd.merge(chain, how='inner', left_index=True, right_index=True)
-            return rst
+            return sd.merge(rchain, how='inner', left_index=True, right_index=True)
         except Exception as ex:
             print_exception(ex)
             return None
 
-    def long_iron_butterfly_builder(self, st, nd):
+    def iron_butterfly_builder(self, st, nd, position_type):
         try:
             print(f'START DATE : {st} | END DATE {nd}', end='')
             odi = self.options_data
@@ -353,9 +395,10 @@ class OptionsBT(object):
             co = cdf['OPEN'].iloc[0] #Call open price
             po = pdf['OPEN'].iloc[0] #Put open price
             #Get strikes for short strangle
-            osi = self.get_options_strike_increment()
+            #osi = self.get_options_strike_increment() * 3
+            #cs, ps = strike + osi, strike - osi
+            cs, ps = OptionsBT.get_strikes_at_price(st, odi, 40, CandleData.OPEN)
             #Buy at the money strike straddle
-            cs, ps = strike + osi, strike - osi
             print(f' | ATM : {strike} | CS : {cs} | PS : {ps}')
             df = odi[(odi['TIMESTAMP'] >= st) & (odi['EXPIRY_DT'] == nd) & (odi['STRIKE_PR'] == cs)]
             dfg = df.groupby('OPTION_TYP')
@@ -377,8 +420,13 @@ class OptionsBT(object):
             chain = ln_chain.merge(st_chain, how='inner', left_index=True, right_index=True, suffixes=['_CL', '_PR'])
 
             #Calculate end of term position status
-                            #-----------#BUY AT THE MONEY STRIKE------------####-------------SELL OTM STRIKE-----------------------#
-            chain['DPL'] = (chain['CLOSE_C'] - co) + (chain['CLOSE_P'] - po) + (col - chain['CLOSE_CL']) + (por - chain['CLOSE_PR'])
+            if position_type == PositionType.LONG:
+                                #-----------#BUY AT THE MONEY STRIKE------------####-------------SELL OTM STRIKE-----------------------#
+                chain['DPL'] = (chain['CLOSE_C'] - co) + (chain['CLOSE_P'] - po) + (col - chain['CLOSE_CL']) + (por - chain['CLOSE_PR'])
+            elif position_type == PositionType.SHORT:
+                               #-----------#SELL AT THE MONEY STRIKE------------####-------------BUY OTM STRIKE-----------------------#
+                chain['DPL'] = (co - chain['CLOSE_C']) + (po - chain['CLOSE_P']) + (chain['CLOSE_CL'] - col) + (chain['CLOSE_PR'] - por)
+
             chain['PL_OPEN'] = 0
             chain['PL_LOW'] = chain['DPL']
             chain['PL_HIGH'] = chain['DPL']
@@ -411,132 +459,115 @@ class OptionsBT(object):
             print_exception(ex)
             return None
 
-    def e2e_straddle(self, symbol, instrument, lot_size, num_lots, margin_per_lot, stop_loss, stop_loss_threshold, brokerage, n_expiry=10):
+    def e2e_straddle(self, symbol, instrument, lot_size, num_lots, margin_per_lot, stop_loss, stop_loss_threshold, brokerage, n_expiry=10, position_type=PositionType.SHORT):
         try:
             self.prepare_strategy(symbol, instrument, n_expiry)
-            sdf = self.expirys.groupby(['EX_START', 'EXPIRY_DT']).apply(lambda x: self.e2e_straddle_builder(x['EX_START'].iloc[0], x['EXPIRY_DT'].iloc[0], CandleData.OPEN))
+            sdf = self.expirys.groupby(['EX_START', 'EXPIRY_DT']).apply(lambda x: self.e2e_straddle_builder(x['EX_START'].iloc[0], x['EXPIRY_DT'].iloc[0], position_type))
             sdf = sdf.reset_index().drop(['TIMESTAMP'], axis=1)
-            sdf['LOT_SIZE'] = lot_size
-            sdf['NUM_LOTS'] = num_lots
-            sdf['TOTAL_LOTS'] = num_lots * 2
-            sdf['MARGIN_PER_LOT'] = margin_per_lot
-            sdf['MARGIN_REQUIRED'] = margin_per_lot * sdf['TOTAL_LOTS']
-            sdf['STOP_LOSS'] = stop_loss
-            sdf['STOP_LOSS_TRIGGER'] = stop_loss_threshold
-            sdf['NET_PL_LO'] = sdf['PL_LOW'] * num_lots * lot_size
-            sdf['NET_PL_HI'] = sdf['PL_HIGH'] * num_lots * lot_size
-            sdf['NET_PL_CL'] = sdf['PL_CLOSE'] * num_lots * lot_size
-            #STOP LOSS HIT FIRST 
-            sdf['STOP_LOSS_HIT'] = (sdf['PL_LO_IDX'] < sdf['PL_HI_IDX']) & (sdf['NET_PL_LO'] < (stop_loss_threshold * -1)) | ((sdf['NET_PL_HI'] < stop_loss) & (sdf['NET_PL_CL'] < (stop_loss * -1)))
-            #TRAILING STOP LOSS, CLOSING PROFIT IS LESS THAN HIGH PROFIT - STOP LOSS THRESHOLD
-            sdf['SL_HI_GT_CL'] = sdf['NET_PL_CL'] < (sdf['NET_PL_HI'] - stop_loss_threshold)
-            sdf['GROSS'] = np.where(sdf['STOP_LOSS_HIT'], stop_loss * -1, np.where(sdf['SL_HI_GT_CL'], sdf['NET_PL_HI'] - stop_loss, sdf['NET_PL_CL']))
-            sdf['BROKERAGE'] = brokerage
-            sdf['NET'] = sdf['GROSS'] - brokerage
-            sdf['%'] = (sdf['NET']/sdf['MARGIN_REQUIRED'])*100
-            sdf['LOSE_COUNT'] = sdf['NET'].apply(self.count_losing_streak)
-            sdf['CUM_LOSE_COUNT'] = sdf['NET'].apply(self.count_cumulative_losing_streak)
-            sdf['CUM_NET'] = sdf['NET'].cumsum()
-            self.strategy_df = sdf
-            self.write_to_excel('E2E_STRADDLE', symbol, n_expiry, num_lots, lot_size)
+            self.strategy_df = self.calculate_profit_2(sdf, lot_size, num_lots, margin_per_lot, stop_loss, stop_loss_threshold, brokerage)
+            self.write_to_excel(f'{position_type}_E2E_STRADDLE', symbol, n_expiry, num_lots, lot_size)
             return self.strategy_df
         except Exception as ex:
             print_exception(ex)
             return None
     
-    def e2e_strangle(self, symbol, instrument, lot_size, num_lots, stop_loss, brokerage, price=50, n_expiry=10):
+    def e2e_strangle(self, symbol, instrument, lot_size, num_lots, margin_per_lot, stop_loss, stop_loss_threshold, brokerage, price=50, n_expiry=10):
         try:
             self.prepare_strategy(symbol, instrument, n_expiry)
             expg = self.expirys.groupby(['EX_START', 'EXPIRY_DT'])
-            strangle_df = expg.apply(lambda x: self.e2e_strangle_builder(x['EX_START'].iloc[0], x['EXPIRY_DT'].iloc[0], price, CandleData.OPEN))
-            strangle_df = strangle_df.reset_index().drop(['TIMESTAMP'], axis=1)
-            sdf = OptionsBT.calculate_profit(strangle_df, lot_size, num_lots, brokerage, stop_loss)
-            self.strategy_df = self.set_losing_streak(sdf)
+            sdf = expg.apply(lambda x: self.e2e_strangle_builder(x['EX_START'].iloc[0], x['EXPIRY_DT'].iloc[0], price))
+            sdf = sdf.reset_index().drop(['TIMESTAMP'], axis=1)
+            self.strategy_df = self.calculate_profit_2(sdf, lot_size, num_lots, margin_per_lot, stop_loss, stop_loss_threshold, brokerage) 
             self.write_to_excel(f'E2E_STRANGLE{price}', symbol, n_expiry, num_lots, lot_size)
             return self.strategy_df
         except Exception as ex:
             print_exception(ex)
             return None
          
-    def long_iron_butterfly(self, symbol, instrument, lot_size, num_lots, margin_per_lot, stop_loss, stop_loss_threshold, brokerage, n_expiry=10):
+    def iron_butterfly(self, symbol, instrument, lot_size, num_lots, margin_per_lot, stop_loss, stop_loss_threshold, brokerage, n_expiry=10, position_type=PositionType.SHORT):
         try:
             self.prepare_strategy(symbol, instrument, n_expiry)
             expg = self.expirys.groupby(['EX_START', 'EXPIRY_DT'])
-            sdf = expg.apply(lambda x: self.long_iron_butterfly_builder(x['EX_START'].iloc[0], x['EXPIRY_DT'].iloc[0]))
+            sdf = expg.apply(lambda x: self.iron_butterfly_builder(x['EX_START'].iloc[0], x['EXPIRY_DT'].iloc[0], position_type))
             sdf = sdf.reset_index().drop(['TIMESTAMP'], axis=1)
-            sdf['LOT_SIZE'] = lot_size
-            sdf['NUM_LOTS'] = num_lots
-            sdf['TOTAL_LOTS'] = num_lots * 2
-            sdf['MARGIN_PER_LOT'] = margin_per_lot
-            sdf['MARGIN_REQUIRED'] = margin_per_lot * sdf['TOTAL_LOTS']
-            sdf['STOP_LOSS'] = stop_loss
-            sdf['STOP_LOSS_TRIGGER'] = stop_loss_threshold
-            sdf['NET_PL_LO'] = sdf['PL_LOW'] * num_lots * lot_size
-            sdf['NET_PL_HI'] = sdf['PL_HIGH'] * num_lots * lot_size
-            sdf['NET_PL_CL'] = sdf['PL_CLOSE'] * num_lots * lot_size
-            sdf['STOP_LOSS_HIT'] = (sdf['PL_LO_IDX'] < sdf['PL_HI_IDX']) & (sdf['NET_PL_LO'] < (stop_loss_threshold * -1)) | ((sdf['NET_PL_HI'] < stop_loss) & (sdf['NET_PL_CL'] < (stop_loss * -1)))
-            sdf['SL_HI_GT_CL'] = sdf['NET_PL_CL'] < (sdf['NET_PL_HI'] - stop_loss_threshold)
-            sdf['GROSS'] = np.where(sdf['STOP_LOSS_HIT'], stop_loss * -1, np.where(sdf['SL_HI_GT_CL'], sdf['NET_PL_HI'] - stop_loss, sdf['NET_PL_CL']))
-            sdf['BROKERAGE'] = brokerage
-            sdf['NET'] = sdf['GROSS'] - brokerage
-            sdf['%'] = (sdf['NET']/sdf['MARGIN_REQUIRED'])*100
-            sdf['LOSE_COUNT'] = sdf['NET'].apply(self.count_losing_streak)
-            sdf['CUM_LOSE_COUNT'] = sdf['NET'].apply(self.count_cumulative_losing_streak)
-            sdf['CUM_NET'] = sdf['NET'].cumsum()
-            self.strategy_df = sdf
-            self.strategy_df = sdf
-            self.strategy_df = self.write_to_excel(f'E2E_IRB', symbol, n_expiry, num_lots, lot_size)
+            self.strategy_df = self.calculate_profit_2(sdf, lot_size, num_lots, margin_per_lot, stop_loss, stop_loss_threshold, brokerage)
+            self.write_to_excel(f'{position_type}_E2E_IRB', symbol, n_expiry, num_lots, lot_size)
+        except Exception as ex:
+            print_exception(ex)
+            return None
+    
+    def calendar_spread_straddle_builder(self, st, nd, nxd):
+        try:
+            print(f'START DATE : {st} | END DATE {nd}')
+            odi = self.options_data
+            sdi = self.spot_data[(self.spot_data['TIMESTAMP'] >= st) & (self.spot_data['TIMESTAMP'] <= nd)]
+            strike = self.get_atm_strike(st)
+            df = odi[(odi['TIMESTAMP'] >= st) & (odi['EXPIRY_DT'] == nd) & (odi['STRIKE_PR'] == strike)]
+            dfg = df.groupby('OPTION_TYP')
+            cdf = dfg.get_group('CE').drop('OPTION_TYP', axis=1).set_index('TIMESTAMP')
+            pdf = dfg.get_group('PE').drop('OPTION_TYP', axis=1).set_index('TIMESTAMP')
+            #Get number of days between start date and end date
+            days = (cdf.index[-1] - cdf.index[0]).days + 1
+            co = cdf['OPEN'].iloc[0] #Call open price
+            po = pdf['OPEN'].iloc[0] #Put open price
+            #Get option data for next expiry same strike
+            df = odi[(odi['TIMESTAMP'] >= st) & (odi['TIMESTAMP'] <= nd) & (odi['EXPIRY_DT'] == nxd) & (odi['STRIKE_PR'] == strike)]
+            dfg = df.groupby('OPTION_TYP')
+            cndf = dfg.get_group('CE').drop('OPTION_TYP', axis=1).set_index('TIMESTAMP')
+            pndf = dfg.get_group('PE').drop('OPTION_TYP', axis=1).set_index('TIMESTAMP')
+            con = cndf['OPEN'].iloc[0] #Call open price of long side
+            pon = pndf['OPEN'].iloc[0] #Put open price of long side
+
+            #Create chain
+            st_chain = cdf.merge(pdf, how='inner', left_index=True, right_index=True, suffixes=['_C', '_P'])
+            ln_chain = cndf.merge(pndf, how='inner', left_index=True, right_index=True, suffixes=['_CN', '_PN'])
+            chain = st_chain.merge(ln_chain, how='inner', left_index=True, right_index=True, suffixes=['_L', '_R'])
+            self.last_DF = chain
+            #Calculate end of term position status
+                            #-----------#SELL AT THE MONEY STRIKE------------####-------------BUY NEXT EXPIRY ATM STRIKE-----------#
+            chain['DPL'] = (co - chain['CLOSE_C']) + (po - chain['CLOSE_P']) + (chain['CLOSE_CN'] - con) + (chain['CLOSE_PN'] - pon)
+            chain['PL_OPEN'] = 0
+            chain['PL_LOW'] = chain['DPL']
+            chain['PL_HIGH'] = chain['DPL']
+            chain['PL_CLOSE'] = chain['DPL']
+            rchain = chain.resample(f'{days}D').agg(Defaults.CALENDAR_SPREAD_CONVERSION)
+            rchain['PL_LO_IDX'] = chain.reset_index()['DPL'].idxmin()
+            rchain['PL_HI_IDX'] = chain.reset_index()['DPL'].idxmax()
+            sd = sdi.set_index('TIMESTAMP').resample(f'{days}D').agg(Defaults.CONVERSION)
+            sd['STRIKE'] = strike
+            return sd.merge(rchain, how='inner', left_index=True, right_index=True)
         except Exception as ex:
             print_exception(ex)
             return None
 
-    @classmethod
-    def e2e_banknifty_straddle(cls, num_expiry, num_lots=5):
-        op = cls()
-        stop_loss = (65000*num_lots*2)*0.015
-        stop_loss_threshold = stop_loss - 1000
-        op.e2e_straddle('BANKNIFTY', InstrumentType.IndexOptions, 40, num_lots=num_lots, margin_per_lot=65000, stop_loss=stop_loss, stop_loss_threshold=stop_loss_threshold, brokerage=100, n_expiry=num_expiry)
-        return op
+    def calendar_spread_straddle(self, symbol, instrument, lot_size, num_lots, margin_per_lot, stop_loss, stop_loss_threshold, brokerage, n_expiry=10):
+        try:
+            self.prepare_strategy(symbol, instrument, n_expiry)
+            expsa = self.options_data['EXPIRY_DT'].drop_duplicates().reset_index(drop=True)
+            self.expirys['NEXPIRY_DT'] = self.expirys['EXPIRY_DT'].apply(lambda x: expsa[expsa[expsa == x].index[0] + 1])
+            expg = self.expirys.groupby(['EX_START', 'EXPIRY_DT'])
+            sdf = expg.apply(lambda x: self.calendar_spread_straddle_builder(x['EX_START'].iloc[0], x['EXPIRY_DT'].iloc[0], x['NEXPIRY_DT'].iloc[0]))
+            sdf = sdf.reset_index().drop(['TIMESTAMP'], axis=1)
+            self.strategy_df = self.calculate_profit_2(sdf, lot_size, num_lots, margin_per_lot, stop_loss, stop_loss_threshold, brokerage)
+            self.write_to_excel(f'E2E_CALENDAR_SPREAD', symbol, n_expiry, num_lots, lot_size)
+        except Exception as ex:
+            print_exception(ex)
+            return None
     
-    @classmethod
-    def e2e_banknifty_strangle(cls, num_expiry, price):
-        op = cls()
-        op.e2e_strangle('BANKNIFTY', InstrumentType.IndexOptions, 40, 10, 10000, 100, price=price, n_expiry=num_expiry)
-        return op
-
-    @classmethod
-    def e2e_nifty_strangle(cls, num_expiry, price):
-        op = cls()
-        op.e2e_strangle('NIFTY', InstrumentType.IndexOptions, 75, 10, 10000, 100, price=price, n_expiry=num_expiry)
-        return op
-
-    @classmethod
-    def bank_nifty_daily_straddle_current_day(cls):
-        op = cls()
-        op.bank_nifty_daily_straddle_for_last_n_days(2)
-        return op
-
-    @classmethod
-    def bank_nifty_daily_straddle_n_days(cls, ndays=1000):
-        op = cls()
-        op.bank_nifty_daily_straddle_for_last_n_days(ndays)
-        return op
-
-    @classmethod
-    def bank_nifty_long_iron_butterfuly(cls, n_expiry=10, num_lots=5):
-        op = cls()
-        stop_loss = (65000*num_lots*2)*0.015
-        stop_loss_threshold = stop_loss - 1000
-        op.long_iron_butterfly('BANKNIFTY', InstrumentType.IndexOptions, lot_size=40, num_lots=num_lots, margin_per_lot=65000, stop_loss=stop_loss, stop_loss_threshold=stop_loss_threshold, brokerage=100, n_expiry=n_expiry)
-        return op
+    def calendar_spread_straddle_only_on_expiry_day(self, symbol, instrument, lot_size, num_lots, margin_per_lot, stop_loss, stop_loss_threshold, brokerage, n_expiry=10):
+        try:
+            self.prepare_strategy(symbol, instrument, n_expiry)
+            expsa = self.options_data['EXPIRY_DT'].drop_duplicates().reset_index(drop=True)
+            self.expirys['EX_START'] = self.expirys['EXPIRY_DT'] - pd.Timedelta('3Day')
+            self.expirys['NEXPIRY_DT'] = self.expirys['EXPIRY_DT'].apply(lambda x: expsa[expsa[expsa == x].index[0] + 1])
+            expg = self.expirys.groupby(['EX_START', 'EXPIRY_DT', 'NEXPIRY_DT'])
+            sdf = expg.apply(lambda x: self.calendar_spread_straddle_builder(x['EX_START'].iloc[0], x['EXPIRY_DT'].iloc[0], x['NEXPIRY_DT'].iloc[0]))
+            sdf = sdf.reset_index().drop(['TIMESTAMP'], axis=1)
+            self.strategy_df = self.calculate_profit_2(sdf, lot_size, num_lots, margin_per_lot, stop_loss, stop_loss_threshold, brokerage)
+            self.write_to_excel(f'E2E_CALENDAR_SPREAD', symbol, n_expiry, num_lots, lot_size)
+        except Exception as ex:
+            print_exception(ex)
+            return None
 
 if __name__ == '__main__':
-    #opn = OptionsBT.e2e_nifty_strangle(24, 100)
-    #opn = OptionsBT.bank_nifty_long_iron_butterfuly(10)
-    #ops = OptionsBT.e2e_banknifty_strangle(100, 60)
-    #ops = OptionsBT.e2e_banknifty_straddle(104, 2)
-    #for x in range(1, 9):
-    #    OptionsBT.e2e_banknifty_straddle(104, x)
-    for x in range(1, 9):
-        OptionsBT.bank_nifty_long_iron_butterfuly(n_expiry=104, num_lots=x)
-        OptionsBT.e2e_banknifty_straddle(104, x)
+    op = OptionsBT()
