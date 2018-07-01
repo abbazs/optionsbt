@@ -4,6 +4,7 @@ from datetime import timedelta, datetime
 import pandas as pd
 import numpy as np
 from pathlib import Path
+import seaborn as sns
 
 import dbtables
 from log import print_exception
@@ -24,7 +25,7 @@ class OptionsBT(object):
             self.losing_streak_counter = 0
             self.cum_losing_streak_counter = 0
             self.options_strike_increment = 0
-            self.results = []
+            self.results = [] 
         except Exception as e:
             print_exception(e)
 
@@ -103,17 +104,17 @@ class OptionsBT(object):
     
     def get_last_n_expiry_with_starting_dates(self, symbol, instrument, n_expiry):
         df = self.get_last_n_expiry_dates(symbol, instrument, n_expiry)
-        df['EX_START'] = df['EXPIRY_DT'].shift(1) + pd.Timedelta('1Day')
+        df['START_DT'] = df['EXPIRY_DT'].shift(1) + pd.Timedelta('1Day')
         df.dropna(inplace=True)
-        df.sort_values(by='EX_START', axis=0, inplace=True)
-        return df[['EX_START', 'EXPIRY_DT']]
+        df.sort_values(by='START_DT', axis=0, inplace=True)
+        return df[['START_DT', 'EXPIRY_DT']]
 
     def get_last_n_expiry_to_expiry_dates(self, symbol, instrument, n_expiry):
         df = self.get_last_n_expiry_dates(symbol, instrument, n_expiry)
-        df['EX_START'] = df['EXPIRY_DT'].shift(1)
+        df['START_DT'] = df['EXPIRY_DT'].shift(1)
         df.dropna(inplace=True)
-        df.sort_values(by='EX_START', axis=0, inplace=True)
-        return df[['EX_START', 'EXPIRY_DT']]
+        df.sort_values(by='START_DT', axis=0, inplace=True)
+        return df[['START_DT', 'EXPIRY_DT']]
 
     @staticmethod
     def get_hlc_difference_with_o(df):
@@ -156,7 +157,7 @@ class OptionsBT(object):
         strategy['NET_LONG'] = strategy['CCG_LONG'] - brokerage
         strategy['NET_SHORT'] = strategy['CCG_SHORT'] - brokerage
         columns = strategy.columns.insert(6, 'DTE')
-        strategy['DTE'] = (strategy['EXPIRY_DT'] - strategy['EX_START']).dt.days
+        strategy['DTE'] = (strategy['EXPIRY_DT'] - strategy['START_DT']).dt.days
         return strategy[columns]
 
     def calculate_profit_2(self, sdf, lot_size, num_lots, margin_per_lot, stop_loss, stop_loss_threshold, brokerage):
@@ -179,6 +180,24 @@ class OptionsBT(object):
             #At any given period it would not be possible to exactly stop at the stop loss, but what ever was the loss at end of period
             sdf['GROSS'] = np.where(sdf['STOP_LOSS_HIT'], sdf['NET_PL_LO'], np.where(sdf['SL_HI_GT_CL'], sdf['NET_PL_HI'] - stop_loss, sdf['NET_PL_CL']))
             sdf['BROKERAGE'] = brokerage
+            sdf['NET'] = sdf['GROSS'] - brokerage
+            sdf['%'] = (sdf['NET']/sdf['MARGIN_REQUIRED'])*100
+            sdf['LOSE_COUNT'] = sdf['NET'].apply(self.count_losing_streak)
+            sdf['CUM_LOSE_COUNT'] = sdf['NET'].apply(self.count_cumulative_losing_streak)
+            sdf['CUM_NET'] = sdf['NET'].cumsum()
+            return sdf
+        except Exception as e:
+            print_exception(e)
+            return None
+    
+    def calculate_profit_double_ratio(self, sdf, lot_size, num_lots, margin_per_lot, brokerage):
+        try:
+            sdf['LOT_SIZE'] = lot_size
+            sdf['NUM_LOTS'] = num_lots
+            sdf['TOTAL_LOTS'] = num_lots * 2
+            sdf['MARGIN_PER_LOT'] = margin_per_lot
+            sdf['MARGIN_REQUIRED'] = margin_per_lot * sdf['TOTAL_LOTS']
+            sdf['GROSS'] = sdf['PL_CLOSE']
             sdf['NET'] = sdf['GROSS'] - brokerage
             sdf['%'] = (sdf['NET']/sdf['MARGIN_REQUIRED'])*100
             sdf['LOSE_COUNT'] = sdf['NET'].apply(self.count_losing_streak)
@@ -221,24 +240,86 @@ class OptionsBT(object):
         strategy_df['LONG_LOSE_COUNT'] = strategy_df['NET_LONG'].apply(self.count_losing_streak)
         return strategy_df
 
-    def write_to_excel(self, strategy, symbol, n_row, num_lots, lot_size):
+    @staticmethod
+    def get_end_of_month(x, eoml):
+        try:
+            wom =  (x['EXPIRY_DT'].day - 1)// 7+1
+            st = x['EXPIRY_DT']
+            me = eoml.searchsorted(st)
+            if wom >= 4:
+                return eoml.iloc[me[0] +1]
+            else:
+                return eoml.iloc[me[0]]
+        except:
+            return None
+
+    @staticmethod
+    def color_negative_red(val):
+        """
+        Takes a scalar and returns a string with
+        the css property `'color: red'` for negative
+        strings, black otherwise.
+        """
+        if type(val) == float:
+            color = 'red' if val < 0 else 'black'
+            return 'color: %s' % color
+        else:
+            return 'color: black'
+
+    def write_to_excel(self, strategy):
         sdf = self.strategy_df
         columns = sdf.columns
-        fname = '{}_{}_{}_{}_{}_{}.xlsx'.format(symbol, strategy, n_row, num_lots, lot_size,datetime.today().strftime('%Y-%m-%d_%H-%M-%S'))
+        fname = f'{strategy}_{datetime.today():%Y-%m-%d_%H-%M-%S}.xlsx'
         file_name = Path(__file__).parent.parent.joinpath('Result', fname)
         try:
-            sdf.style.set_properties(Defaults.CANDLE_COLUMNS, **{'background-color': '#ABEBC6'}) \
-                .set_properties(Defaults.CALL_CANDLE_COLUMNS, **{'background-color': '#F0FFFF'}) \
-                .set_properties(Defaults.PUT_CANDLE_COLUMNS, **{'background-color': '#FFE4E1'}) \
-                .set_properties(Defaults.PL_CANDLE_COLUMNS, **{'background-color': '#E0FFFF'})\
-                .set_properties(Defaults.STOP_LOSS_TRUTH_COLUMNS, **{'background-color': '#F0FFFF'})\
-                .set_properties(Defaults.CONSTANT_COLUMNS, **{'background-color': '#FFE4E1'})\
-                .set_properties(Defaults.PL_NET_COLUMNS, **{'background-color': '#E0FFFF'})\
-                .set_properties(Defaults.NET_COLUMNS, **{'background-color': '#ABEBC6'})\
-                .set_properties(columns[0:], **{'border-color': 'black'}) \
-                .format({'EX_START': '%Y-%m-%d', 'EXPIRY_DT': '%Y-%m-%d'})\
+            styl = sdf.style
+
+            #Get price columns
+            pcols = [columns.get_loc(x) for x in columns if 'OPEN' in x] 
+            pcols1 = pcols[::2]
+            pcols2 = pcols[1::2]
+            for x in pcols1:
+                styl = styl.set_properties(columns[range(x, x+4)], **{'background-color': '#ffc0cb'})
+            for x in pcols2:
+                styl = styl.set_properties(columns[range(x, x+4)], **{'background-color': '#c6e2ff'})
+
+            #Get date columns
+            dcols = [columns.get_loc(x) for x in columns if '_DT' in x]
+            platelets = sns.color_palette("Set3", len(dcols)).as_hex()
+            for i, x in enumerate(dcols):
+                styl = styl.set_properties(columns[x], **{'background-color': platelets[i]})              
+            
+            #Net columns
+            cols = [columns.get_loc(x) for x in columns if 'NET' in x]
+            plts = sns.color_palette("Paired", len(cols)).as_hex()
+            for i, x in enumerate(cols):
+                styl = styl.set_properties(columns[x], **{'background-color': plts[i]})
+
+            #Count columns
+            cols = [columns.get_loc(x) for x in columns if 'COUNT' in x]
+            plts = sns.color_palette("husl", len(cols)).as_hex()
+            for i, x in enumerate(cols):
+                styl = styl.set_properties(columns[x], **{'background-color': plts[i]})
+            
+            #LOT columns
+            cols = [columns.get_loc(x) for x in columns if 'LOT' in x]
+            plts = sns.color_palette("hls", len(cols)).as_hex()
+            for i, x in enumerate(cols):
+                styl = styl.set_properties(columns[x], **{'background-color': plts[i]})
+
+            #Set negative values to red
+            styl.applymap(OptionsBT.color_negative_red)
+
+            #Set date format not working
+            #alphas = list('ABCDEFGHIJKLMNOPQRSTUVWXYZ')
+            #for x in dcols:
+            #    if x < len(alphas):
+            #        styl = styl.format({alphas[x]: '%Y-%m-%d'})
+
+            styl.set_properties(columns[0:], **{'border-color': 'black'}) \
                 .to_excel(file_name, engine='openpyxl', index=False)
-        except:
+        except Exception as ex:
+            print_exception(ex)
             sdf.to_excel(file_name, engine='openpyxl', index=False)
 
     def index_daily_straddle(self, symbol, lot_size, num_lots, brokerage, stop_loss, n_days=10, strike_price=None):
@@ -253,15 +334,11 @@ class OptionsBT(object):
 
         self.spot_data = self.get_spot_data_for_last_n_days(symbol, InstrumentType.Index, n_days=n_days)
         straddle_df = OptionsBT.get_straddle(self.options_data, self.spot_data, strike_price)
-        straddle_df.rename(columns={'TIMESTAMP':'EX_START'}, inplace=True)
+        straddle_df.rename(columns={'TIMESTAMP':'START_DT'}, inplace=True)
         straddle_df = OptionsBT.calculate_profit(straddle_df, lot_size, num_lots, brokerage, stop_loss)
         self.strategy_df = self.set_losing_streak(straddle_df)
-        self.write_to_excel('DAILY_STRADDLE', symbol, n_days, num_lots, lot_size)
+        self.write_to_excel(f'{symbol}_DAILY_STRADDLE_{num_lots}_{n_days}')
         return self.strategy_df
-
-    def bank_nifty_daily_straddle_for_last_n_days(self, n_days):
-        bn_df = self.index_daily_straddle('BANKNIFTY', lot_size=40, num_lots=2, brokerage=500, stop_loss=-10000, n_days=n_days)
-        return bn_df
 
     def get_options_strike_increment(self):
         try:
@@ -286,7 +363,88 @@ class OptionsBT(object):
         atm_i = np.abs(od_df['STRIKE_PR'] - spot).idxmin()
         strike = od_df['STRIKE_PR'].loc[atm_i]
         return strike
+    
+    def get_atm_strike_using_options_data(self, st, expiry, at=CandleData.OPEN):
+        try:
+            od_df = self.options_data[(self.options_data['TIMESTAMP'] >= st) & (self.options_data['EXPIRY_DT'] == expiry)]
 
+            if at == CandleData.CLOSE:
+                od_df = od_df[od_df['CLOSE'] > 0]
+            elif at == CandleData.OPEN:
+                od_df = od_df[od_df['OPEN'] > 0]
+            
+            opg = od_df.groupby('OPTION_TYP')
+            opc = opg.get_group('CE').drop('OPTION_TYP', axis=1).set_index('TIMESTAMP')
+            opc = opc[opc.index == opc.index[0]]
+            opp = opg.get_group('PE').drop('OPTION_TYP', axis=1).set_index('TIMESTAMP')
+            opp = opp[opp.index == opp.index[0]]
+            opm = opc.merge(opp, how='inner', left_index=True, on=['STRIKE_PR'], suffixes=['_C', '_P'])
+            #Starting day may not be a trading day, hence do this.
+            
+            if at == CandleData.CLOSE:
+                idx = (opm['CLOSE_C'] - opm['CLOSE_P']).abs().reset_index(drop=True).idxmin()
+            elif at == CandleData.OPEN:
+                idx = (opm['OPEN_C'] - opm['OPEN_P']).abs().reset_index(drop=True).idxmin()
+
+            return opm['STRIKE_PR'].iloc[idx]
+        except Exception as ex:
+            print(f'EXCEPTION AT | DAY : {st:%Y-%m-%d} - EXPIRY : {expiry:%Y-%m-%d}')
+            print_exception(ex)
+            return None
+    
+    def get_max_oi_pcr(self, od_df):
+        try:
+            opg = od_df.groupby('OPTION_TYP')
+            opc = opg.get_group('CE').drop('OPTION_TYP', axis=1)
+            coi = opc['OPEN_INT'].max()
+            cs = opc[opc['OPEN_INT'] == coi]['STRIKE_PR'].iloc[0]
+            opp = opg.get_group('PE').drop('OPTION_TYP', axis=1)
+            poi = opp['OPEN_INT'].max()
+            ps = opp[opp['OPEN_INT'] == poi]['STRIKE_PR'].iloc[0]
+            tcoi = opc['OPEN_INT'].sum()
+            tpoi = opp['OPEN_INT'].sum()
+            pcr = tpoi/tcoi
+            df = pd.DataFrame([[coi, cs, poi, ps, tcoi, tpoi, pcr]], columns=['COI', 'CS', 'POI', 'PS', 'TCOI', 'TPOI', 'PCR'])
+            return df
+        except Exception as ex:
+            print(f'Calculating maxi oi and pcr')
+            print_exception(ex)
+            return None
+    
+    def prepare_strategy(self, symbol, instrument, n_expiry):
+        try:
+            symbol = symbol.upper()
+            self.expirys = self.get_last_n_expiry_with_starting_dates(symbol, instrument, n_expiry)
+            st = self.expirys['START_DT'].iloc[0]
+            nd = self.expirys['EXPIRY_DT'].iloc[-1]
+            self.spot_data = self.get_spot_data_between_dates(symbol, instrument,  st, nd)
+
+            if self.get_fno_data_between_dates(symbol, st, nd):
+                self.futures_data = self.fno_DF[self.fno_DF['INSTRUMENT'] == InstrumentType.getfutures(instrument)][Defaults.OPTIONS_COLUMNS]
+                self.options_data = self.fno_DF[self.fno_DF['INSTRUMENT'] == instrument][Defaults.OPTIONS_COLUMNS]
+                opcr = self.options_data.groupby(['EXPIRY_DT', 'TIMESTAMP']).apply(lambda x: self.get_max_oi_pcr(x))
+                self.oi_pcr = opcr.reset_index().drop(columns=['level_2'])
+            else:
+                print('Failed to get fno data')
+                return None
+        except Exception as ex:
+            print_exception(ex)
+            return None
+
+    def get_atm_strike_from_futures(self, day):
+        try:
+            odf = self.options_data[self.options_data['TIMESTAMP'] >= day]
+            fdf = self.futures_data[self.futures_data['TIMESTAMP'] >= day]
+            ce = fdf['EXPIRY_DT'].drop_duplicates().iloc[0]
+            fdi = fdf[fdf['EXPIRY_DT'] == ce]
+            future = fdi['OPEN'].iloc[0]
+            atm_i = np.abs(odf['STRIKE_PR'] - future).idxmin()
+            strike = odf['STRIKE_PR'].loc[atm_i]
+            return strike, fdi
+        except Exception as ex:
+            print_exception(ex)
+            return None
+    
     @staticmethod
     def get_strikes_at_price(day, options_data, price, at):
         try:
@@ -310,7 +468,8 @@ class OptionsBT(object):
             print(f'START DATE : {st} | END DATE {nd}')
             odi = self.options_data
             sdi = self.spot_data[(self.spot_data['TIMESTAMP'] >= st) & (self.spot_data['TIMESTAMP'] <= nd)]
-            strike = self.get_atm_strike(st)
+            #strike = self.get_atm_strike(st)
+            strike = self.get_atm_strike_using_options_data(st, nd)
             df = odi[(odi['TIMESTAMP'] >= st) & (odi['EXPIRY_DT'] == nd) & (odi['STRIKE_PR'] == strike)]
             dfg = df.groupby('OPTION_TYP')
             cdf = dfg.get_group('CE').drop('OPTION_TYP', axis=1).set_index('TIMESTAMP')
@@ -337,6 +496,7 @@ class OptionsBT(object):
             rchain['PL_HI_IDX'] = chain.reset_index()['DPL'].idxmax()
             sd = sdi.set_index('TIMESTAMP').resample(f'{days}D').agg(Defaults.CONVERSION)
             sd['STRIKE'] = strike
+            sd['PCR'] = self.oi_pcr[(self.oi_pcr['TIMESTAMP'] == st) & (self.oi_pcr['EXPIRY_DT'] == nd)]['PCR'].iloc[0]
             return sd.merge(rchain, how='inner', left_index=True, right_index=True)
         except Exception as ex:
             print_exception(ex)
@@ -375,6 +535,7 @@ class OptionsBT(object):
             rchain['PL_LO_IDX'] = chain.reset_index()['DPL'].idxmin()
             rchain['PL_HI_IDX'] = chain.reset_index()['DPL'].idxmax()
             sd = sdi.set_index('TIMESTAMP').resample(f'{days}D').agg(Defaults.CONVERSION)
+            sd['PCR'] = self.oi_pcr[(self.oi_pcr['TIMESTAMP'] == st) & (self.oi_pcr['EXPIRY_DT'] == nd)]['PCR'].iloc[0]
             return sd.merge(rchain, how='inner', left_index=True, right_index=True)
         except Exception as ex:
             print_exception(ex)
@@ -385,7 +546,8 @@ class OptionsBT(object):
             print(f'START DATE : {st} | END DATE {nd}', end='')
             odi = self.options_data
             sdi = self.spot_data[(self.spot_data['TIMESTAMP'] >= st) & (self.spot_data['TIMESTAMP'] <= nd)]
-            strike = self.get_atm_strike(st)
+            #strike = self.get_atm_strike(st)
+            strike = self.get_atm_strike_using_options_data(st, nd)
             df = odi[(odi['TIMESTAMP'] >= st) & (odi['EXPIRY_DT'] == nd) & (odi['STRIKE_PR'] == strike)]
             dfg = df.groupby('OPTION_TYP')
             cdf = dfg.get_group('CE').drop('OPTION_TYP', axis=1).set_index('TIMESTAMP')
@@ -436,25 +598,8 @@ class OptionsBT(object):
             rchain['PL_HI_IDX'] = chain.reset_index()['DPL'].idxmax()
             sd = sdi.set_index('TIMESTAMP').resample(f'{days}D').agg(Defaults.CONVERSION)
             sd['STRIKE'] = strike
+            sd['PCR'] = self.oi_pcr[(self.oi_pcr['TIMESTAMP'] == st) & (self.oi_pcr['EXPIRY_DT'] == nd)]['PCR'].iloc[0]
             return sd.merge(rchain, how='inner', left_index=True, right_index=True)
-        except Exception as ex:
-            print_exception(ex)
-            return None
-
-    def prepare_strategy(self, symbol, instrument, n_expiry):
-        try:
-            symbol = symbol.upper()
-            self.expirys = self.get_last_n_expiry_with_starting_dates(symbol, instrument, n_expiry)
-            st = self.expirys['EX_START'].iloc[0]
-            nd = self.expirys['EXPIRY_DT'].iloc[-1]
-            self.spot_data = self.get_spot_data_between_dates(symbol, instrument,  st, nd)
-
-            if self.get_fno_data_between_dates(symbol, st, nd):
-                self.futures_data = self.fno_DF[self.fno_DF['INSTRUMENT'] == InstrumentType.getfutures(instrument)][Defaults.OPTIONS_COLUMNS]
-                self.options_data = self.fno_DF[self.fno_DF['INSTRUMENT'] == instrument][Defaults.OPTIONS_COLUMNS]
-            else:
-                print('Failed to get fno data')
-                return None
         except Exception as ex:
             print_exception(ex)
             return None
@@ -462,10 +607,10 @@ class OptionsBT(object):
     def e2e_straddle(self, symbol, instrument, lot_size, num_lots, margin_per_lot, stop_loss, stop_loss_threshold, brokerage, n_expiry=10, position_type=PositionType.SHORT):
         try:
             self.prepare_strategy(symbol, instrument, n_expiry)
-            sdf = self.expirys.groupby(['EX_START', 'EXPIRY_DT']).apply(lambda x: self.e2e_straddle_builder(x['EX_START'].iloc[0], x['EXPIRY_DT'].iloc[0], position_type))
+            sdf = self.expirys.groupby(['START_DT', 'EXPIRY_DT']).apply(lambda x: self.e2e_straddle_builder(x['START_DT'].iloc[0], x['EXPIRY_DT'].iloc[0], position_type))
             sdf = sdf.reset_index().drop(['TIMESTAMP'], axis=1)
             self.strategy_df = self.calculate_profit_2(sdf, lot_size, num_lots, margin_per_lot, stop_loss, stop_loss_threshold, brokerage)
-            self.write_to_excel(f'{position_type}_E2E_STRADDLE', symbol, n_expiry, num_lots, lot_size)
+            self.write_to_excel(f'{symbol}_{position_type}_E2E_STRADDLE_{num_lots}_{n_expiry}')
             return self.strategy_df
         except Exception as ex:
             print_exception(ex)
@@ -474,11 +619,11 @@ class OptionsBT(object):
     def e2e_strangle(self, symbol, instrument, lot_size, num_lots, margin_per_lot, stop_loss, stop_loss_threshold, brokerage, price=50, n_expiry=10):
         try:
             self.prepare_strategy(symbol, instrument, n_expiry)
-            expg = self.expirys.groupby(['EX_START', 'EXPIRY_DT'])
-            sdf = expg.apply(lambda x: self.e2e_strangle_builder(x['EX_START'].iloc[0], x['EXPIRY_DT'].iloc[0], price))
+            expg = self.expirys.groupby(['START_DT', 'EXPIRY_DT'])
+            sdf = expg.apply(lambda x: self.e2e_strangle_builder(x['START_DT'].iloc[0], x['EXPIRY_DT'].iloc[0], price))
             sdf = sdf.reset_index().drop(['TIMESTAMP'], axis=1)
             self.strategy_df = self.calculate_profit_2(sdf, lot_size, num_lots, margin_per_lot, stop_loss, stop_loss_threshold, brokerage) 
-            self.write_to_excel(f'E2E_STRANGLE{price}', symbol, n_expiry, num_lots, lot_size)
+            self.write_to_excel(f'{symbol}_E2E_STRANGLE_{price}_{num_lots}_{n_expiry}')
             return self.strategy_df
         except Exception as ex:
             print_exception(ex)
@@ -487,21 +632,20 @@ class OptionsBT(object):
     def iron_butterfly(self, symbol, instrument, lot_size, num_lots, margin_per_lot, stop_loss, stop_loss_threshold, brokerage, n_expiry=10, position_type=PositionType.SHORT):
         try:
             self.prepare_strategy(symbol, instrument, n_expiry)
-            expg = self.expirys.groupby(['EX_START', 'EXPIRY_DT'])
-            sdf = expg.apply(lambda x: self.iron_butterfly_builder(x['EX_START'].iloc[0], x['EXPIRY_DT'].iloc[0], position_type))
+            expg = self.expirys.groupby(['START_DT', 'EXPIRY_DT'])
+            sdf = expg.apply(lambda x: self.iron_butterfly_builder(x['START_DT'].iloc[0], x['EXPIRY_DT'].iloc[0], position_type))
             sdf = sdf.reset_index().drop(['TIMESTAMP'], axis=1)
             self.strategy_df = self.calculate_profit_2(sdf, lot_size, num_lots, margin_per_lot, stop_loss, stop_loss_threshold, brokerage)
-            self.write_to_excel(f'{position_type}_E2E_IRB', symbol, n_expiry, num_lots, lot_size)
+            self.write_to_excel(f'{symbol}_{position_type}_E2E_IRB_{num_lots}_{n_expiry}')
         except Exception as ex:
             print_exception(ex)
             return None
     
     def calendar_spread_straddle_builder(self, st, nd, nxd):
         try:
-            print(f'START DATE : {st} | END DATE {nd}')
+            print(f'START DATE : {st:%Y-%m-%d} | END DATE : {nd:%Y-%m-%d} | LONG EXPIRY : {nxd:%Y-%m-%d}')
             odi = self.options_data
-            sdi = self.spot_data[(self.spot_data['TIMESTAMP'] >= st) & (self.spot_data['TIMESTAMP'] <= nd)]
-            strike = self.get_atm_strike(st)
+            strike = self.get_atm_strike_using_options_data(st, nd)
             df = odi[(odi['TIMESTAMP'] >= st) & (odi['EXPIRY_DT'] == nd) & (odi['STRIKE_PR'] == strike)]
             dfg = df.groupby('OPTION_TYP')
             cdf = dfg.get_group('CE').drop('OPTION_TYP', axis=1).set_index('TIMESTAMP')
@@ -526,6 +670,8 @@ class OptionsBT(object):
             #Calculate end of term position status
                             #-----------#SELL AT THE MONEY STRIKE------------####-------------BUY NEXT EXPIRY ATM STRIKE-----------#
             chain['DPL'] = (co - chain['CLOSE_C']) + (po - chain['CLOSE_P']) + (chain['CLOSE_CN'] - con) + (chain['CLOSE_PN'] - pon)
+            if con == 0 or pon == 0:
+                chain['DPL'] = (co - chain['CLOSE_C']) + (po - chain['CLOSE_P'])
             chain['PL_OPEN'] = 0
             chain['PL_LOW'] = chain['DPL']
             chain['PL_HIGH'] = chain['DPL']
@@ -535,6 +681,7 @@ class OptionsBT(object):
             rchain['PL_HI_IDX'] = chain.reset_index()['DPL'].idxmax()
             sd = sdi.set_index('TIMESTAMP').resample(f'{days}D').agg(Defaults.CONVERSION)
             sd['STRIKE'] = strike
+            sd['PCR'] = self.oi_pcr[(self.oi_pcr['TIMESTAMP'] == st) & (self.oi_pcr['EXPIRY_DT'] == nd)]['PCR'].iloc[0]
             return sd.merge(rchain, how='inner', left_index=True, right_index=True)
         except Exception as ex:
             print_exception(ex)
@@ -543,13 +690,16 @@ class OptionsBT(object):
     def calendar_spread_straddle(self, symbol, instrument, lot_size, num_lots, margin_per_lot, stop_loss, stop_loss_threshold, brokerage, n_expiry=10):
         try:
             self.prepare_strategy(symbol, instrument, n_expiry)
+            #Get all the expiry dates
             expsa = self.options_data['EXPIRY_DT'].drop_duplicates().reset_index(drop=True)
-            self.expirys['NEXPIRY_DT'] = self.expirys['EXPIRY_DT'].apply(lambda x: expsa[expsa[expsa == x].index[0] + 1])
-            expg = self.expirys.groupby(['EX_START', 'EXPIRY_DT'])
-            sdf = expg.apply(lambda x: self.calendar_spread_straddle_builder(x['EX_START'].iloc[0], x['EXPIRY_DT'].iloc[0], x['NEXPIRY_DT'].iloc[0]))
+            #Get monthly expiry dates
+            mexp = self.futures_data['EXPIRY_DT'].drop_duplicates().reset_index(drop=True)
+            self.expirys['NEXPIRY_DT'] = self.expirys.apply(lambda x: OptionsBT.get_end_of_month(x, mexp), axis=1)
+            expg = self.expirys.groupby(['START_DT', 'EXPIRY_DT', 'NEXPIRY_DT'])
+            sdf = expg.apply(lambda x: self.calendar_spread_straddle_builder(x['START_DT'].iloc[0], x['EXPIRY_DT'].iloc[0], x['NEXPIRY_DT'].iloc[0]))
             sdf = sdf.reset_index().drop(['TIMESTAMP'], axis=1)
             self.strategy_df = self.calculate_profit_2(sdf, lot_size, num_lots, margin_per_lot, stop_loss, stop_loss_threshold, brokerage)
-            self.write_to_excel(f'E2E_CALENDAR_SPREAD', symbol, n_expiry, num_lots, lot_size)
+            self.write_to_excel(f'{symbol}_E2E_CALENDAR_SPREAD_{num_lots}_{n_expiry}')
         except Exception as ex:
             print_exception(ex)
             return None
@@ -558,16 +708,169 @@ class OptionsBT(object):
         try:
             self.prepare_strategy(symbol, instrument, n_expiry)
             expsa = self.options_data['EXPIRY_DT'].drop_duplicates().reset_index(drop=True)
-            self.expirys['EX_START'] = self.expirys['EXPIRY_DT'] - pd.Timedelta('3Day')
-            self.expirys['NEXPIRY_DT'] = self.expirys['EXPIRY_DT'].apply(lambda x: expsa[expsa[expsa == x].index[0] + 1])
-            expg = self.expirys.groupby(['EX_START', 'EXPIRY_DT', 'NEXPIRY_DT'])
-            sdf = expg.apply(lambda x: self.calendar_spread_straddle_builder(x['EX_START'].iloc[0], x['EXPIRY_DT'].iloc[0], x['NEXPIRY_DT'].iloc[0]))
+            #Get monthly expiry dates
+            mexp = self.futures_data['EXPIRY_DT'].drop_duplicates().reset_index(drop=True)
+            self.expirys['NEXPIRY_DT'] = self.expirys.apply(lambda x: OptionsBT.get_end_of_month(x, mexp), axis=1)
+            expg = self.expirys.groupby(['START_DT', 'EXPIRY_DT', 'NEXPIRY_DT'])
+            sdf = expg.apply(lambda x: self.calendar_spread_straddle_builder(x['START_DT'].iloc[0], x['EXPIRY_DT'].iloc[0], x['NEXPIRY_DT'].iloc[0]))
             sdf = sdf.reset_index().drop(['TIMESTAMP'], axis=1)
             self.strategy_df = self.calculate_profit_2(sdf, lot_size, num_lots, margin_per_lot, stop_loss, stop_loss_threshold, brokerage)
-            self.write_to_excel(f'E2E_CALENDAR_SPREAD', symbol, n_expiry, num_lots, lot_size)
+            self.write_to_excel(f'{symbol}_E2E_CALENDAR_SPREAD_EXPIRY_DAY_ONLY_{num_lots}_{n_expiry}')
         except Exception as ex:
             print_exception(ex)
             return None
+
+    def double_ratio_spread_builder(self, st, nd, lot_size, r1=2, r2=3):
+        """ double ratio spread builder
+        ratio - ratio at which the spread needs to be constructed 2:3:1 is standard, 3:4:1, 4:5:1, 3:5:2 are all valid 
+        Parameters:
+            st - start date
+            nd - end date
+            lot_size - size of the lot
+            r1 - first part of ratio write - long leg - shall be starting from 2
+            r2 - second part of ratio write - short leg - shall be r1 + at least 1
+        """
+        try:
+            #atm = self.get_atm_strike(st)
+            atm = self.get_atm_strike_using_options_data(st, nd)
+            #Strike increment
+            si = self.get_options_strike_increment()
+            #Short Call Strike
+            scs = atm + si
+            #Short Put Strike
+            sps = atm - si
+            #Long Call Strike
+            lcs = scs + si
+            #Long Put Strike
+            lps = sps - si
+
+            r3 = r2 - r1 #Ratio 3rd part of it
+
+            print(f'Start : {st:%Y-%m-%d} | End : {nd:%Y-%m-%d} | ATM : {atm} | SCS : {scs} | LCS : {lcs} | SPS : {sps} | LPS : {lps}')
+            odi = self.options_data
+            sdi = self.spot_data[(self.spot_data['TIMESTAMP'] >= st) & (self.spot_data['TIMESTAMP'] <= nd)]
+            #Build ATM
+            atm_df = odi[(odi['TIMESTAMP'] >= st) & (odi['EXPIRY_DT'] == nd) & (odi['STRIKE_PR'] == atm)]
+            atm_dfg = atm_df.groupby('OPTION_TYP')
+            atm_c = atm_dfg.get_group('CE').drop('OPTION_TYP', axis=1).set_index('TIMESTAMP')
+            atm_p = atm_dfg.get_group('PE').drop('OPTION_TYP', axis=1).set_index('TIMESTAMP')
+            atm_d = atm_c.merge(atm_p, how='inner', left_index=True, right_index=True, suffixes=['_CA', '_PA'])
+            acl = atm_d.columns.insert(0, 'STRIKE_ATM')
+            atm_d['STRIKE_ATM'] = atm
+            atm_d = atm_d[acl]
+            #Build short
+            scs_df = odi[(odi['TIMESTAMP'] >= st) & (odi['EXPIRY_DT'] == nd) & (odi['STRIKE_PR'] == scs)]
+            scs_df = scs_df.groupby('OPTION_TYP').get_group('CE').drop('OPTION_TYP', axis=1).set_index('TIMESTAMP')
+            acl = scs_df.columns.insert(0, 'STRIKE')
+            scs_df['STRIKE'] = scs
+            scs_df = scs_df[acl]
+            sps_df = odi[(odi['TIMESTAMP'] >= st) & (odi['EXPIRY_DT'] == nd) & (odi['STRIKE_PR'] == sps)]
+            sps_df = sps_df.groupby('OPTION_TYP').get_group('PE').drop('OPTION_TYP', axis=1).set_index('TIMESTAMP')
+            sps_df['STRIKE'] = sps
+            sps_df = sps_df[acl]
+            short_df = scs_df.merge(sps_df, how='inner', left_index=True, right_index=True, suffixes=['_CS', '_PS'])
+            #Build Long
+            lcs_df = odi[(odi['TIMESTAMP'] >= st) & (odi['EXPIRY_DT'] == nd) & (odi['STRIKE_PR'] == lcs)]
+            lcs_df = lcs_df.groupby('OPTION_TYP').get_group('CE').drop('OPTION_TYP', axis=1).set_index('TIMESTAMP')
+            acl = lcs_df.columns.insert(0, 'STRIKE')
+            lcs_df['STRIKE'] = lcs
+            lcs_df = lcs_df[acl]
+            lps_df = odi[(odi['TIMESTAMP'] >= st) & (odi['EXPIRY_DT'] == nd) & (odi['STRIKE_PR'] == lps)]
+            lps_df = lps_df.groupby('OPTION_TYP').get_group('PE').drop('OPTION_TYP', axis=1).set_index('TIMESTAMP')
+            lps_df['STRIKE'] = lps
+            lps_df = lps_df[acl]
+            long_df = lcs_df.merge(lps_df, how='inner', left_index=True, right_index=True, suffixes=['_CL', '_PL'])
+            chain = pd.concat([atm_d, short_df, long_df], axis=1)[Defaults.DOUBLE_RATIO_COLUMNS]
+            self.last_DF = chain
+            # Get all the required open prices
+            aco = atm_c['OPEN'].iloc[0]
+            apo = atm_p['OPEN'].iloc[0]
+            sco = scs_df['OPEN'].iloc[0]
+            spo = sps_df['OPEN'].iloc[0]
+            lco = lcs_df['OPEN'].iloc[0]
+            lpo = lps_df['OPEN'].iloc[0]
+
+            #Get number of days between start date and end date
+            ndays = (atm_c.index[-1] - atm_c.index[0]).days + 1
+            #Calculate end of term position status
+            chain['ATM_PL'] = ((chain['CLOSE_CA'] - aco) + (chain['CLOSE_PA'] - apo)) * r1 * lot_size        #BUY ATM STRIKE 2 LOTS
+            chain['SHT_PL'] = ((sco - chain['CLOSE_CS']) + (spo - chain['CLOSE_PS'])) * r2 * lot_size        #SHORT ONE STRIKE AWAY FROM ATM 3 LOTS
+            chain['LNG_PL'] = ((chain['CLOSE_CL'] - lco) + (chain['CLOSE_PL'] - lpo)) * r3 * lot_size        #BUY ONE STRIKE AWAY FROM SHORT STRIKE 1 LOT
+            chain['DPL'] =  chain['ATM_PL'] +  chain['SHT_PL'] + chain['LNG_PL']
+            chain['PL_OPEN'] = 0
+            chain['PL_LOW'] = chain['DPL']
+            chain['PL_HIGH'] = chain['DPL']
+            chain['PL_CLOSE'] = chain['DPL']
+            rchain = chain.resample(f'{ndays}D').agg(Defaults.DOUBLE_RATIO_CONVERSION)
+            rchain['PL_LO_IDX'] = chain.reset_index()['DPL'].idxmin()
+            rchain['PL_HI_IDX'] = chain.reset_index()['DPL'].idxmax()
+            rchain['MAX_LOSS'] = ((aco + apo) * r1 * lot_size) + ((lco + lpo) * r3 * lot_size) - ((sco + spo) * r2 * lot_size)
+            sd = sdi.set_index('TIMESTAMP').resample(f'{ndays}D').agg(Defaults.CONVERSION)
+            sd['PCR'] = self.oi_pcr[(self.oi_pcr['TIMESTAMP'] == st) & (self.oi_pcr['EXPIRY_DT'] == nd)]['PCR'].iloc[0]
+            return sd.merge(rchain, how='inner', left_index=True, right_index=True)
+        except Exception as ex:
+            print_exception(ex)
+            return None
+
+    def double_ratio_spread_days_before_expiry(self, symbol, instrument, lot_size, margin_per_lot, brokerage, r1=2, r2=3, days_before=2, n_expiry=10):
+        """ ratio spread shortly before expiry
+            strategy is to buy two losts of CE & PE ATM
+            sell 3 lots of next immediate OTM's respectively
+            buy 1 lot of next immedate OTM's (after the sold OTM) respectively
+        Parameters:
+            symbol - 'BANKNIFTY', 'NIFTY', 'HDFC' etc
+            instrument - OPTIDX or STKIDX
+            lot_size - size of lot
+            margin_per_lot - margin per lot
+            brokerage - total brokerage for the strategy
+            r1 - first part of ratio write - long leg - shall be starting from 2
+            r2 - second part of ratio write - short leg - shall be r1 + at least 1
+            days_before - number of days before expiry the trade initiated
+            n_expiry = number of expirys to be considered
+            """
+        try:
+            self.prepare_strategy(symbol, instrument, n_expiry)
+            self.expirys['START_DT'] = self.expirys['EXPIRY_DT'] - pd.Timedelta(f'{days_before}Day')
+            expg = self.expirys.groupby(['START_DT', 'EXPIRY_DT'])
+            sdf = expg.apply(lambda x: self.double_ratio_spread_builder(x['START_DT'].iloc[0], x['EXPIRY_DT'].iloc[0], lot_size=lot_size, r1=r1, r2=r2))
+            sdf = sdf.reset_index().drop(['TIMESTAMP'], axis=1)
+            self.strategy_df = self.calculate_profit_double_ratio(sdf, lot_size, r2, margin_per_lot, brokerage)
+            self.write_to_excel(f'{symbol}_RATIO_SPREAD_{days_before}_BE_{r1}-{r2}-{r2-r1}_{n_expiry}')
+        except Exception as ex:
+            print_exception(ex)
+            return None
+
+    def e2e_double_ratio_spread(self, symbol, instrument, lot_size, margin_per_lot, brokerage, r1=2, r2=3, n_expiry=10):
+        """ ratio spread shortly before expiry
+            strategy is to buy two losts of CE & PE ATM
+            sell 3 lots of next immediate OTM's respectively
+            buy 1 lot of next immedate OTM's (after the sold OTM) respectively
+        Parameters:
+            symbol - 'BANKNIFTY', 'NIFTY', 'HDFC' etc
+            instrument - OPTIDX or STKIDX
+            lot_size - size of lot
+            margin_per_lot - margin per lot
+            brokerage - total brokerage for the strategy
+            r1 - first part of ratio write - long leg - shall be starting from 2
+            r2 - second part of ratio write - short leg - shall be r1 + at least 1
+            n_expiry = number of expirys to be considered
+            """
+        try:
+            self.prepare_strategy(symbol, instrument, n_expiry)
+            expg = self.expirys.groupby(['START_DT', 'EXPIRY_DT'])
+            sdf = expg.apply(lambda x: self.double_ratio_spread_builder(x['START_DT'].iloc[0], x['EXPIRY_DT'].iloc[0], lot_size=lot_size, r1=r1, r2=r2))
+            sdf = sdf.reset_index().drop(['TIMESTAMP'], axis=1)
+            self.strategy_df = self.calculate_profit_double_ratio(sdf, lot_size, r2, margin_per_lot, brokerage)
+            self.write_to_excel(f'{symbol}_E2E_RATIO_SPREAD_{r1}-{r2}-{r2-r1}_{n_expiry}')
+        except Exception as ex:
+            print_exception(ex)
+            return None
+
+    def e2e_ratio_write_at_max_oi(self, symbol, instrument, lot_size, margin_per_lot, brokerage, n_expiry=10):
+        """
+        Ratio write: buy a strike away from atm in any direction and sell more number of strikes next to it having lower premiums.
+        If strike 120CE is bought for 24 premium then sell 3X strike 140CE at 12 premium
+        """
 
 if __name__ == '__main__':
     op = OptionsBT()
