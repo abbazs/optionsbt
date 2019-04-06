@@ -1,6 +1,5 @@
 from datetime import datetime, date, timedelta
 
-
 def get_current_date():
     if datetime.today().hour < 17:
         dt = date.today() - timedelta(days=1)
