@@ -81,6 +81,13 @@ def e2e_banknifty_strangle(num_lots=5, price=50, num_expiry=104):
                     stop_loss=stop_loss, stop_loss_threshold=stop_loss_threshold, brokerage=100, price=price, n_expiry=num_expiry)
     return op
 
+def e2e_banknifty_dist_strangle(num_lots=5, dist=3, num_expiry=104):
+    op = OptionsBT()
+    stop_loss = (65000*num_lots*2)*0.015
+    stop_loss_threshold = stop_loss * 0.9
+    op.e2e_dist_strangle('BANKNIFTY', InstrumentType.IndexOptions, lot_size=40, num_lots=num_lots, margin_per_lot=65000,
+                    stop_loss=stop_loss, stop_loss_threshold=stop_loss_threshold, brokerage=100, dist=dist, n_expiry=num_expiry)
+    return op
 
 def expiry_day_banknifty_strangle(num_lots=2, price=50, num_expiry=104):
     op = OptionsBT()
