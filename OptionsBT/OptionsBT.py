@@ -291,30 +291,24 @@ class OptionsBT(object):
             
             #Net columns
             cols = [columns.get_loc(x) for x in columns if 'NET' in x]
-            plts = sns.color_palette("Paired", len(cols)).as_hex()
+            plts = sns.light_palette("#4d070b", n_colors=len(cols)*2).as_hex()
             for i, x in enumerate(cols):
                 styl = styl.set_properties(columns[x], **{'background-color': plts[i]})
 
             #Count columns
             cols = [columns.get_loc(x) for x in columns if 'COUNT' in x]
-            plts = sns.color_palette("husl", len(cols)).as_hex()
+            plts = sns.color_palette("husl", len(cols)*2).as_hex()
             for i, x in enumerate(cols):
                 styl = styl.set_properties(columns[x], **{'background-color': plts[i]})
             
             #LOT columns
             cols = [columns.get_loc(x) for x in columns if 'LOT' in x]
-            plts = sns.color_palette("hls", len(cols)).as_hex()
+            plts = sns.light_palette("green", len(cols)*2).as_hex()
             for i, x in enumerate(cols):
                 styl = styl.set_properties(columns[x], **{'background-color': plts[i]})
 
             #Set negative values to red
             styl.applymap(OptionsBT.color_negative_red)
-
-            #Set date format not working
-            #alphas = list('ABCDEFGHIJKLMNOPQRSTUVWXYZ')
-            #for x in dcols:
-            #    if x < len(alphas):
-            #        styl = styl.format({alphas[x]: '%Y-%m-%d'})
 
             styl.set_properties(columns[0:], **{'border-color': 'black'}) \
                 .to_excel(file_name, engine='openpyxl', index=False)
@@ -543,7 +537,7 @@ class OptionsBT(object):
             odi = self.options_data
             cs, ps = OptionsBT.get_strikes_at_price(st, odi, price, CandleData.OPEN)
             rchain = self.strangle_bulider(st, nd, cs, ps)
-            rchain['ATPR'] = price
+            rchain['ATPR'] = price #ATPR is At the price
             ndays = (nd - st).days + 1
             sdi = self.spot_data[(self.spot_data['TIMESTAMP'] >= st) & (self.spot_data['TIMESTAMP'] <= nd)]
             sd = sdi.set_index('TIMESTAMP').resample(f'{ndays}D').agg(Defaults.CONVERSION)
@@ -639,7 +633,21 @@ class OptionsBT(object):
         except Exception as ex:
             print_exception(ex)
             return None
-         
+    
+    def expiry_day_strangle(self, symbol, instrument, lot_size, num_lots, margin_per_lot, stop_loss, stop_loss_threshold, brokerage, price=50, n_expiry=10):
+        try:
+            self.prepare_strategy(symbol, instrument, n_expiry)
+            self.expirys['START_DT'] = self.expirys['EXPIRY_DT']
+            expg = self.expirys.groupby(['START_DT', 'EXPIRY_DT'])
+            sdf = expg.apply(lambda x: self.e2e_strangle_builder(x['START_DT'].iloc[0], x['EXPIRY_DT'].iloc[0], price))
+            sdf = sdf.reset_index().drop(['TIMESTAMP'], axis=1)
+            self.strategy_df = self.calculate_profit_2(sdf, lot_size, num_lots, margin_per_lot, stop_loss, stop_loss_threshold, brokerage) 
+            self.write_to_excel(f'{symbol}_EXPIRY_DAY_STRANGLE_{price}_{num_lots}_{n_expiry}')
+            return self.strategy_df
+        except Exception as ex:
+            print_exception(ex)
+            return None
+
     def iron_butterfly(self, symbol, instrument, lot_size, num_lots, margin_per_lot, stop_loss, stop_loss_threshold, brokerage, n_expiry=10, position_type=PositionType.SHORT):
         try:
             self.prepare_strategy(symbol, instrument, n_expiry)
@@ -839,7 +847,7 @@ class OptionsBT(object):
             r2 - second part of ratio write - short leg - shall be r1 + at least 1
             days_before - number of days before expiry the trade initiated
             n_expiry = number of expirys to be considered
-            """
+        """
         try:
             self.prepare_strategy(symbol, instrument, n_expiry)
             self.expirys['START_DT'] = self.expirys['EXPIRY_DT'] - pd.Timedelta(f'{days_before}Day')

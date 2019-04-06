@@ -260,3 +260,11 @@ paket-files/
 # Python Tools for Visual Studio (PTVS)
 __pycache__/
 *.pyc
+*.png
+*.csv
+*.xlsx
+*.pptx
+*.txt
+*.pdf
+*.docx
+test.py
