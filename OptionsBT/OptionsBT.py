@@ -531,11 +531,17 @@ class OptionsBT(object):
             print_exception(ex)
             return None
 
-    def e2e_strangle_builder(self, st, nd, price):
+    def e2e_strangle_builder(self, st, nd, price, dist=None):
         try:
             print(f'START DATE : {st} | END DATE {nd}')
             odi = self.options_data
-            cs, ps = OptionsBT.get_strikes_at_price(st, odi, price, CandleData.OPEN)
+            if dist == None:
+                cs, ps = OptionsBT.get_strikes_at_price(st, odi, price, CandleData.CLOSE)
+            elif price == None:
+                strike = self.get_atm_strike_using_options_data(st, nd)
+                sinc = self.get_options_strike_increment()
+                cs = strike + (dist * sinc)
+                ps = strike - (dist * sinc)
             rchain = self.strangle_bulider(st, nd, cs, ps)
             rchain['ATPR'] = price #ATPR is At the price
             ndays = (nd - st).days + 1
@@ -629,6 +635,32 @@ class OptionsBT(object):
             sdf = sdf.reset_index().drop(['TIMESTAMP'], axis=1)
             self.strategy_df = self.calculate_profit_2(sdf, lot_size, num_lots, margin_per_lot, stop_loss, stop_loss_threshold, brokerage) 
             self.write_to_excel(f'{symbol}_E2E_STRANGLE_{price}_{num_lots}_{n_expiry}')
+            return self.strategy_df
+        except Exception as ex:
+            print_exception(ex)
+            return None
+    
+    def e2e_dist_strangle(self, symbol, instrument, lot_size, num_lots, margin_per_lot, stop_loss, stop_loss_threshold, brokerage, dist=3, n_expiry=10):
+        '''
+        Expiry to expiry distance based strangle
+        parameters:
+        symbol - example nifty or banknifty
+        instrument - OPTIDX or FUTIDX
+        lot_size - what is the lot size of the instrument?
+        margin_per_lot - what is the margin required per lot?
+        stop_loss - what is the stop loss?
+        stop_loss_threshold - at what price the stop loss gets triggered?
+        brokerage - what is the brokerage?
+        dist - number of strike distance at which strangle is created from the spot?
+        n_expiry - number of expirys to trade?
+        '''
+        try:
+            self.prepare_strategy(symbol, instrument, n_expiry)
+            expg = self.expirys.groupby(['START_DT', 'EXPIRY_DT'])
+            sdf = expg.apply(lambda x: self.e2e_strangle_builder(x['START_DT'].iloc[0], x['EXPIRY_DT'].iloc[0], dist))
+            sdf = sdf.reset_index().drop(['TIMESTAMP'], axis=1)
+            self.strategy_df = self.calculate_profit_2(sdf, lot_size, num_lots, margin_per_lot, stop_loss, stop_loss_threshold, brokerage) 
+            self.write_to_excel(f'{symbol}_E2E_STRANGLE_{dist}_{num_lots}_{n_expiry}')
             return self.strategy_df
         except Exception as ex:
             print_exception(ex)
